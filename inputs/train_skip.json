@@ -1,0 +1,49 @@
+{
+    "io": {
+        "density_file": "test_train/densities/density_series.npy",
+        "overlap_file": "test_train/data/h2_plus_rttddft_overlap.npy",
+        "field_file": "test_train/data/field.dat",
+        "model_save_path": "skip_step_model.pt",
+        "history_path": "skip_step_history.json",
+        "pretrained_path": null
+    },
+    "system": {
+        "n_basis": 4,
+        "dt_fine": 0.4
+    },
+    "model": {
+        "model_type": "lstm",
+        "seq_len": 20,
+        "hidden_dim": 128
+    },
+    "skip_step": {
+        "initial_skip": 1,
+        "final_skip": 20,
+        "supervision_mode": "endpoints",
+        "intermediate_samples": 2
+    },
+    "curriculum": {
+        "use_curriculum": true,
+        "curriculum_warmup": 20,
+        "curriculum_schedule": "exponential"
+    },
+    "training": {
+        "batch_size": 32,
+        "learning_rate": 1e-3,
+        "weight_decay": 1e-4,
+        "epochs": 200,
+        "rollout_steps": 5,
+        "val_split": 0.1,
+        "noise_scale": 1e-3
+    },
+    "regularization": {
+        "lambda_smoothness": 1e-4,
+        "lambda_energy": 1e-4,
+        "lambda_phase": 1e-5,
+        "smoothness_scale": 0.1,
+        "energy_scale": 0.1
+    },
+    "physics": {
+        "time_reversal_correction": true
+    }
+}

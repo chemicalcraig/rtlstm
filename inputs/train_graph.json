@@ -1,0 +1,39 @@
+{
+    "io": {
+        "density_file": "test_train/densities/density_series.npy",
+        "overlap_file": "test_train/data/h2_plus_rttddft_overlap.npy",
+        "field_file": "test_train/data/field.dat",
+        "positions_file": null,
+        "atomic_numbers_file": null,
+        "model_save_path": "density_graph.pt"
+    },
+    "system": {
+        "n_basis": 4,
+        "n_alpha": 1.0,
+        "n_beta": 0.0
+    },
+    "model": {
+        "seq_len": 20,
+        "hidden_dim": 128,
+        "n_gnn_layers": 3,
+        "n_lstm_layers": 2,
+        "n_attention_heads": 4,
+        "dropout": 0.1
+    },
+    "training": {
+        "batch_size": 8,
+        "learning_rate": 1e-3,
+        "weight_decay": 1e-4,
+        "epochs": 200,
+        "rollout_steps": 5,
+        "val_split": 0.1,
+        "patience": 50,
+        "noise_scale": 1e-3
+    },
+    "physics": {
+        "lambda_trace": 1e-4,
+        "lambda_idem": 1e-5,
+        "overlap_threshold": 1e-6,
+        "time_reversal_correction": true
+    }
+}
