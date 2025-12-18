@@ -72,6 +72,7 @@ outputs/
 results/
 figures/*.png
 figures/*.pdf
+*.png
 
 # Temporary
 tmp/

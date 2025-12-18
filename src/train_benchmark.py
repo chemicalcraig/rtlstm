@@ -17,12 +17,8 @@ class MolecularDynamicsDataset(Dataset):
     def __init__(self, density_file, field_file, seq_len, rollout_steps=1):
         print(f"Loading density data from {density_file}...")
         data_dict = np.load(density_file, allow_pickle=True).item()
-        
-        # --- FIX: Time Reversal Correction ---
-        # The bootstrap/extraction tool produces conjugated (time-reversed) matrices.
-        # We conjugate here to orient the arrow of time forward.
         raw_rho = torch.tensor(data_dict['density'], dtype=CFG['dtype'])
-        self.rho = torch.conj(raw_rho)
+        self.rho = raw_rho
         
         try:
             field_data = np.loadtxt(field_file)
@@ -146,8 +142,8 @@ def train():
             x_seq, f_seq, y_seq = x_seq.to(CFG['device']), f_seq.to(CFG['device']), y_seq.to(CFG['device'])
             
             # Noise Injection (Drift Simulation)
-            if model.training:
-                x_seq = x_seq + (torch.randn_like(x_seq) * 1e-3)
+            # if model.training:
+            #     x_seq = x_seq + (torch.randn_like(x_seq) * 1e-8)
 
             opt.zero_grad()
             total_loss = 0
@@ -177,7 +173,7 @@ def train():
             opt.step()
             ep_loss += total_loss.item()
         
-        if (epoch+1)%10 == 0: print(f"Epoch {epoch+1}: {ep_loss/len(loader):.5f}")
+        if (epoch+1)%10 == 0: print(f"Epoch {epoch+1}: {ep_loss/len(loader):.7f}")
         
     torch.save(model.state_dict(), CFG['model_save_path'])
     return model, data

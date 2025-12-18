@@ -4,6 +4,6 @@
 #PREREQUISITE: copy model from training into working directory
 LSTMDIR=/home/craig/programs/rtlstm
 NWCALCNAME=h2_plus_rttddft
-NDENS=20
+NDENS=90
 python ${LSTMDIR}/src/extract_densities.py --n-densities $NDENS perm/${NWCALCNAME}.rt_restart
 python ${LSTMDIR}/src/predict_config.py predict.json
