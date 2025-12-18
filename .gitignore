@@ -24,7 +24,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+*Zone.Identifier
 # Virtual environments
 venv/
 env/
