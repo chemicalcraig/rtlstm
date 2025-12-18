@@ -548,6 +548,10 @@ class DensityGraphNet(nn.Module):
     - Size independence (works with any basis set size)
     - Transferability (train on H2+, infer on H2)
     - Physics-aware learning (respects matrix structure)
+
+    Skip-Step Support:
+    - Optional k-conditioning for variable time-step prediction
+    - Learnable scaling based on skip factor
     """
 
     def __init__(self, config: Dict):
@@ -563,6 +567,8 @@ class DensityGraphNet(nn.Module):
                 - n_lstm_layers: Number of LSTM layers
                 - n_attention_heads: Number of attention heads
                 - dropout: Dropout rate
+                - max_skip_factor: Maximum k for skip-step (default: 32)
+                - use_skip_conditioning: Whether to condition on k (default: False)
         """
         super().__init__()
 
@@ -582,6 +588,10 @@ class DensityGraphNet(nn.Module):
         self.n_attention_heads = config.get('n_attention_heads', 4)
         self.dropout = config.get('dropout', 0.1)
 
+        # Skip-step configuration
+        self.max_skip_factor = config.get('max_skip_factor', 32)
+        self.use_skip_conditioning = config.get('use_skip_conditioning', False)
+
         # GNN encoder
         self.gnn_encoder = DensityMessagePassing(
             node_dim=self.node_dim,
@@ -600,12 +610,39 @@ class DensityGraphNet(nn.Module):
             dropout=self.dropout
         )
 
+        # Skip-step conditioning components
+        if self.use_skip_conditioning:
+            self.k_embedding_dim = config.get('k_embedding_dim', 32)
+
+            # Learnable embedding for skip factor
+            self.k_embedding = nn.Embedding(self.max_skip_factor + 1, self.k_embedding_dim)
+
+            # Combine k embedding with temporal context
+            self.k_context_fusion = nn.Sequential(
+                nn.Linear(self.hidden_dim + self.k_embedding_dim, self.hidden_dim),
+                nn.SiLU(),
+                nn.Linear(self.hidden_dim, self.hidden_dim)
+            )
+
+            # Learnable output scale based on k (larger k → larger delta expected)
+            self.k_scale = nn.Sequential(
+                nn.Linear(self.k_embedding_dim, 32),
+                nn.SiLU(),
+                nn.Linear(32, 1),
+                nn.Softplus()  # Ensure positive scale
+            )
+
+            # Decoder with k-conditioned context
+            decoder_context_dim = self.hidden_dim
+        else:
+            decoder_context_dim = self.hidden_dim
+
         # Decoder
         self.decoder = DensityDecoder(
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,
             hidden_dim=self.hidden_dim,
-            context_dim=self.hidden_dim,
+            context_dim=decoder_context_dim,
             num_layers=3,
             dropout=self.dropout
         )
@@ -690,7 +727,8 @@ class DensityGraphNet(nn.Module):
         self,
         graph_seq: List[MolecularGraph],
         next_field: torch.Tensor,
-        return_matrix: bool = False
+        return_matrix: bool = False,
+        skip_factor: int = 1
     ) -> torch.Tensor:
         """
         Forward pass: predict next density state.
@@ -699,6 +737,7 @@ class DensityGraphNet(nn.Module):
             graph_seq: List of seq_len MolecularGraph objects (history)
             next_field: (3,) or (B, 3) field at next timestep
             return_matrix: If True, return full density matrix instead of edges
+            skip_factor: k - number of time steps to skip (for skip-step training)
 
         Returns:
             If return_matrix:
@@ -722,6 +761,26 @@ class DensityGraphNet(nn.Module):
         # Temporal processing
         context = self.temporal(encoded_edges, edge_batches)  # (B, hidden_dim)
 
+        # Apply skip-factor conditioning if enabled
+        if self.use_skip_conditioning:
+            device = context.device
+            k_clamped = min(skip_factor, self.max_skip_factor)
+            k_tensor = torch.tensor([k_clamped], dtype=torch.long, device=device)
+            k_embed = self.k_embedding(k_tensor)  # (1, k_embedding_dim)
+
+            # Expand k_embed to batch size
+            batch_size = context.shape[0]
+            k_embed = k_embed.expand(batch_size, -1)  # (B, k_embedding_dim)
+
+            # Fuse k with temporal context
+            context_with_k = torch.cat([context, k_embed], dim=-1)
+            context = self.k_context_fusion(context_with_k)  # (B, hidden_dim)
+
+            # Compute k-dependent scale
+            k_scale = self.k_scale(k_embed)  # (B, 1)
+        else:
+            k_scale = None
+
         # Get last graph for decoding
         last_graph = graph_seq[-1]
         last_nodes = encoded_nodes[-1]
@@ -737,6 +796,12 @@ class DensityGraphNet(nn.Module):
             context,
             last_edge_batch
         )  # (E, 4)
+
+        # Apply k-dependent scaling
+        if k_scale is not None:
+            # Expand scale to edge level
+            scale_edge = k_scale[last_edge_batch]  # (E, 1)
+            delta_rho = delta_rho * scale_edge
 
         # Enforce Hermiticity
         delta_rho = enforce_hermiticity_edges(delta_rho, last_edge_index)
@@ -760,7 +825,8 @@ class DensityGraphNet(nn.Module):
     def predict_step(
         self,
         graph_seq: List[MolecularGraph],
-        next_field: torch.Tensor
+        next_field: torch.Tensor,
+        skip_factor: int = 1
     ) -> MolecularGraph:
         """
         Predict next graph state (for autoregressive inference).
@@ -768,12 +834,13 @@ class DensityGraphNet(nn.Module):
         Args:
             graph_seq: List of MolecularGraph objects (history)
             next_field: (3,) field at next timestep
+            skip_factor: k - number of time steps being skipped
 
         Returns:
             next_graph: MolecularGraph with predicted density
         """
         # Get delta prediction
-        delta_rho = self.forward(graph_seq, next_field, return_matrix=False)
+        delta_rho = self.forward(graph_seq, next_field, return_matrix=False, skip_factor=skip_factor)
 
         # Create new graph with updated density
         last_graph = graph_seq[-1]
@@ -781,6 +848,43 @@ class DensityGraphNet(nn.Module):
         new_graph.edge_density = last_graph.edge_density + delta_rho
 
         return new_graph
+
+    def predict_trajectory(
+        self,
+        initial_graphs: List[MolecularGraph],
+        field_sequence: torch.Tensor,
+        n_steps: int,
+        skip_factor: int = 1
+    ) -> List[MolecularGraph]:
+        """
+        Predict a trajectory of states autoregressively.
+
+        Args:
+            initial_graphs: List of initial graph sequence (history)
+            field_sequence: (n_steps, 3) field values for each prediction step
+            n_steps: Number of steps to predict
+            skip_factor: k - time steps per prediction
+
+        Returns:
+            trajectory: List of n_steps predicted MolecularGraph objects
+        """
+        self.eval()
+        trajectory = []
+        current_seq = list(initial_graphs)
+
+        with torch.no_grad():
+            for step in range(n_steps):
+                # Get field for this step
+                field = field_sequence[step] if step < len(field_sequence) else field_sequence[-1]
+
+                # Predict next state
+                next_graph = self.predict_step(current_seq, field, skip_factor=skip_factor)
+                trajectory.append(next_graph)
+
+                # Update sequence (slide window)
+                current_seq = current_seq[1:] + [next_graph]
+
+        return trajectory
 
 
 # =============================================================================
@@ -874,6 +978,141 @@ class GraphPhysicsLoss(nn.Module):
                 idem_beta = torch.norm(rhoS_beta @ rho_beta - rho_beta) ** 2
 
                 idem_loss = idem_alpha + idem_beta
+                total_loss = total_loss + self.lambda_idem * idem_loss
+                loss_dict['idem'] = idem_loss.detach()
+
+        return total_loss, loss_dict
+
+
+class SkipStepGraphLoss(nn.Module):
+    """
+    Skip-step aware loss function for graph-based density prediction.
+
+    Extends GraphPhysicsLoss with:
+    - Adaptive regularization based on skip factor k
+    - Smoothness penalty for temporal coherence
+    - Phase coherence penalty for quantum consistency
+    - Optional intermediate supervision support
+    """
+
+    def __init__(
+        self,
+        lambda_trace: float = 1e-4,
+        lambda_idem: float = 1e-5,
+        lambda_smooth: float = 1e-4,
+        lambda_phase: float = 1e-5,
+        n_electrons_alpha: float = 1.0,
+        n_electrons_beta: float = 0.0,
+        k_ref: float = 1.0,
+        adaptive_scaling: bool = True
+    ):
+        """
+        Initialize skip-step loss.
+
+        Args:
+            lambda_trace: Weight for trace conservation
+            lambda_idem: Weight for idempotency
+            lambda_smooth: Weight for smoothness regularization
+            lambda_phase: Weight for phase coherence
+            n_electrons_alpha: Target alpha electron count
+            n_electrons_beta: Target beta electron count
+            k_ref: Reference skip factor (regularization = 1.0 at this k)
+            adaptive_scaling: Scale regularization with k
+        """
+        super().__init__()
+
+        self.lambda_trace = lambda_trace
+        self.lambda_idem = lambda_idem
+        self.lambda_smooth = lambda_smooth
+        self.lambda_phase = lambda_phase
+        self.n_electrons_alpha = n_electrons_alpha
+        self.n_electrons_beta = n_electrons_beta
+        self.k_ref = k_ref
+        self.adaptive_scaling = adaptive_scaling
+
+    def forward(
+        self,
+        delta_pred: torch.Tensor,
+        delta_target: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_density_current: torch.Tensor,
+        S: Optional[torch.Tensor] = None,
+        n_basis: Optional[int] = None,
+        skip_factor: int = 1,
+        prev_delta: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Compute skip-step aware loss.
+
+        Args:
+            delta_pred: (E, 4) predicted delta
+            delta_target: (E, 4) target delta
+            edge_index: (2, E) edge indices
+            edge_density_current: (E, 4) current density
+            S: Optional (N, N) overlap matrix
+            n_basis: Number of basis functions
+            skip_factor: k - current skip factor
+            prev_delta: Optional previous prediction for smoothness
+
+        Returns:
+            total_loss: Scalar loss
+            loss_dict: Component losses
+        """
+        # Scale regularization with k if enabled
+        if self.adaptive_scaling:
+            k_scale = skip_factor / self.k_ref
+        else:
+            k_scale = 1.0
+
+        # Base MSE loss
+        mse_loss = F.mse_loss(delta_pred, delta_target)
+        total_loss = mse_loss
+        loss_dict = {'mse': mse_loss.detach(), 'k': torch.tensor(float(skip_factor))}
+
+        # Smoothness regularization (penalize jerky predictions)
+        if self.lambda_smooth > 0 and prev_delta is not None:
+            smooth_loss = F.mse_loss(delta_pred, prev_delta)
+            total_loss = total_loss + self.lambda_smooth * k_scale * smooth_loss
+            loss_dict['smooth'] = smooth_loss.detach()
+
+        # Phase coherence (penalize large imaginary component variance)
+        if self.lambda_phase > 0:
+            # Imaginary parts are at indices 1 and 3
+            im_alpha = delta_pred[:, 1]
+            im_beta = delta_pred[:, 3]
+            phase_var = im_alpha.var() + im_beta.var()
+            total_loss = total_loss + self.lambda_phase * k_scale * phase_var
+            loss_dict['phase'] = phase_var.detach()
+
+        # Physics constraints
+        if S is not None and n_basis is not None:
+            new_edges = edge_density_current + delta_pred
+            rho_pred = edge_features_to_density(new_edges, edge_index, n_basis, symmetrize=True)
+
+            rho_alpha = rho_pred[0]
+            rho_beta = rho_pred[1]
+            S_real = S.real if torch.is_complex(S) else S
+            S_complex = S_real.to(rho_alpha.dtype)
+
+            # Trace conservation
+            if self.lambda_trace > 0:
+                trace_alpha = torch.real(torch.trace(rho_alpha @ S_complex))
+                trace_beta = torch.real(torch.trace(rho_beta @ S_complex))
+
+                trace_loss = (trace_alpha - self.n_electrons_alpha) ** 2 + \
+                            (trace_beta - self.n_electrons_beta) ** 2
+
+                total_loss = total_loss + self.lambda_trace * trace_loss
+                loss_dict['trace'] = trace_loss.detach()
+
+            # Idempotency
+            if self.lambda_idem > 0:
+                rhoS_alpha = rho_alpha @ S_complex
+                rhoS_beta = rho_beta @ S_complex
+
+                idem_loss = torch.norm(rhoS_alpha @ rho_alpha - rho_alpha) ** 2 + \
+                           torch.norm(rhoS_beta @ rho_beta - rho_beta) ** 2
+
                 total_loss = total_loss + self.lambda_idem * idem_loss
                 loss_dict['idem'] = idem_loss.detach()
 

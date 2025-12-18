@@ -562,6 +562,274 @@ def collate_graph_sequences(
     return input_seqs, field_targets, target_seqs
 
 
+# =============================================================================
+# Skip-Step Graph Dataset
+# =============================================================================
+
+class SkipStepGraphDataset(Dataset):
+    """
+    Skip-step dataset for graph-based density matrix propagation.
+
+    Enables learning mappings t → t + k·Δt where k > 1, providing
+    computational speedup by skipping intermediate time steps.
+
+    Supports:
+        - Dynamic skip factor adjustment (for curriculum learning)
+        - Multiple supervision modes (endpoints, intermediate, multi-scale)
+        - Efficient graph construction with shared static features
+    """
+
+    def __init__(
+        self,
+        density_file: str,
+        field_file: str,
+        overlap_file: str,
+        positions_file: Optional[str] = None,
+        atomic_numbers_file: Optional[str] = None,
+        seq_len: int = 20,
+        rollout_steps: int = 5,
+        skip_factor: int = 1,
+        overlap_threshold: float = 1e-6,
+        time_reversal_correction: bool = True,
+        supervision_mode: str = "endpoints",
+        intermediate_samples: int = 2
+    ):
+        """
+        Initialize skip-step graph dataset.
+
+        Args:
+            density_file: Path to density matrix time series
+            field_file: Path to field data
+            overlap_file: Path to overlap matrix
+            positions_file: Optional path to basis positions
+            atomic_numbers_file: Optional path to atomic numbers
+            seq_len: Sequence length (at coarse resolution)
+            rollout_steps: Number of prediction steps
+            skip_factor: k - number of fine steps per coarse step
+            overlap_threshold: Graph sparsification threshold
+            time_reversal_correction: Apply conjugation fix
+            supervision_mode: 'endpoints', 'intermediate', or 'multi_scale'
+            intermediate_samples: Points between endpoints for intermediate mode
+        """
+        print(f"[SkipStepGraphDataset] Loading data...")
+
+        # Load density matrices
+        data_dict = np.load(density_file, allow_pickle=True)
+        if isinstance(data_dict, np.ndarray) and data_dict.dtype == object:
+            data_dict = data_dict.item()
+
+        raw_rho = torch.tensor(data_dict['density'], dtype=torch.complex128)
+
+        if time_reversal_correction:
+            self.rho = torch.conj(raw_rho)
+        else:
+            self.rho = raw_rho
+
+        self.n_timesteps, self.n_spin, self.n_basis, _ = self.rho.shape
+        print(f"[SkipStepGraphDataset] {self.n_timesteps} timesteps, "
+              f"{self.n_spin} spins, {self.n_basis} basis")
+
+        # Load field
+        try:
+            field_data = np.loadtxt(field_file)
+            if field_data.ndim == 1:
+                field_data = field_data.reshape(-1, 3)
+            elif field_data.shape[1] == 4:
+                field_data = field_data[:, 1:]
+            self.field = torch.tensor(field_data, dtype=torch.float64)
+        except Exception:
+            print("[SkipStepGraphDataset] Warning: Could not load field, using zeros")
+            self.field = torch.zeros((self.n_timesteps, 3), dtype=torch.float64)
+
+        # Align lengths
+        min_len = min(len(self.rho), len(self.field))
+        self.rho = self.rho[:min_len]
+        self.field = self.field[:min_len]
+        self.n_timesteps = min_len
+
+        # Load overlap matrix
+        self.S = torch.tensor(np.load(overlap_file), dtype=torch.float64)
+
+        # Load or generate positions
+        if positions_file is not None:
+            self.positions = torch.tensor(np.load(positions_file), dtype=torch.float64)
+        else:
+            self.positions = torch.zeros(self.n_basis, 3, dtype=torch.float64)
+            self.positions[:, 0] = torch.arange(self.n_basis, dtype=torch.float64)
+
+        # Load or generate atomic numbers
+        if atomic_numbers_file is not None:
+            self.atomic_numbers = torch.tensor(np.load(atomic_numbers_file), dtype=torch.long)
+        else:
+            self.atomic_numbers = torch.ones(self.n_basis, dtype=torch.long)
+
+        # Build graph structure (shared across all timesteps)
+        self.edge_index, self.edge_static = build_graph_from_overlap(
+            self.S, self.positions, self.atomic_numbers,
+            threshold=overlap_threshold, include_self_loops=True
+        )
+
+        self.node_features = compute_node_features(
+            self.atomic_numbers, self.positions, use_one_hot=True
+        )
+
+        print(f"[SkipStepGraphDataset] Graph: {self.n_basis} nodes, "
+              f"{self.edge_index.shape[1]} edges")
+
+        # Skip-step parameters
+        self.seq_len = seq_len
+        self.rollout_steps = rollout_steps
+        self.k = skip_factor
+        self.supervision_mode = supervision_mode
+        self.intermediate_samples = intermediate_samples
+
+        # Compute valid sample range
+        self._update_sample_count()
+
+    def _update_sample_count(self):
+        """Update number of valid samples based on current k."""
+        required_span = (self.seq_len + self.rollout_steps) * self.k
+        self.n_samples = max(0, self.n_timesteps - required_span)
+
+    def set_skip_factor(self, k: int):
+        """Update skip factor (for curriculum learning)."""
+        self.k = k
+        self._update_sample_count()
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def _build_graph_at_time(self, t: int) -> MolecularGraph:
+        """Build graph for a specific timestep."""
+        rho_t = self.rho[t]
+        edge_density = density_to_edge_features(rho_t, self.edge_index)
+
+        return MolecularGraph(
+            edge_index=self.edge_index.clone(),
+            num_nodes=self.n_basis,
+            node_features=self.node_features.clone(),
+            edge_static=self.edge_static.clone(),
+            edge_density=edge_density,
+            atomic_numbers=self.atomic_numbers.clone(),
+            positions=self.positions.clone()
+        )
+
+    def __getitem__(self, idx: int) -> Tuple[List[MolecularGraph], torch.Tensor,
+                                             List[MolecularGraph], Dict]:
+        """
+        Get a skip-step training sample.
+
+        Returns:
+            input_graphs: List of seq_len graphs at coarse resolution
+            field_targets: (rollout_steps, 3) target fields
+            target_graphs: List of rollout_steps target graphs
+            supervision: Dict with skip info and optional intermediate targets
+        """
+        # Build input sequence at coarse resolution (stride k)
+        input_graphs = []
+        for i in range(self.seq_len):
+            t = idx + i * self.k
+            input_graphs.append(self._build_graph_at_time(t))
+
+        # Build target sequence
+        target_start = idx + self.seq_len * self.k
+        target_graphs = []
+        target_indices = []
+
+        for i in range(self.rollout_steps):
+            t = target_start + i * self.k
+            target_graphs.append(self._build_graph_at_time(t))
+            target_indices.append(t)
+
+        # Get target fields
+        field_targets = self.field[target_indices]
+
+        # Build supervision dict
+        supervision = {
+            'skip_factor': self.k,
+            'mode': self.supervision_mode,
+            'target_indices': target_indices
+        }
+
+        # Add intermediate supervision if requested
+        if self.supervision_mode == 'intermediate' and self.k > 1:
+            intermediate_graphs = []
+            intermediate_times = []
+
+            for step in range(self.rollout_steps):
+                step_start = target_start + step * self.k
+                step_end = target_start + (step + 1) * self.k
+
+                if self.intermediate_samples > 0:
+                    sample_indices = np.linspace(
+                        step_start, step_end,
+                        self.intermediate_samples + 2,
+                        dtype=int
+                    )[1:-1]
+
+                    for si in sample_indices:
+                        if si < self.n_timesteps:
+                            intermediate_graphs.append(self._build_graph_at_time(si))
+                            intermediate_times.append(si - target_start)
+
+            if intermediate_graphs:
+                supervision['intermediate_graphs'] = intermediate_graphs
+                supervision['intermediate_times'] = intermediate_times
+
+        elif self.supervision_mode == 'multi_scale' and self.k > 1:
+            # Provide targets at multiple scales
+            multi_scale = {}
+            for scale_k in [1, 2, 4, 8]:
+                if scale_k < self.k:
+                    scale_graphs = []
+                    n_scale_steps = min(self.rollout_steps * (self.k // scale_k),
+                                       self.n_timesteps - target_start)
+
+                    for i in range(n_scale_steps):
+                        t = target_start + i * scale_k
+                        if t < self.n_timesteps:
+                            scale_graphs.append(self._build_graph_at_time(t))
+
+                    if scale_graphs:
+                        multi_scale[scale_k] = scale_graphs
+
+            supervision['multi_scale'] = multi_scale
+
+        return input_graphs, field_targets, target_graphs, supervision
+
+    def get_graph_info(self) -> Dict:
+        """Return graph structure information."""
+        return {
+            'n_nodes': self.n_basis,
+            'n_edges': self.edge_index.shape[1],
+            'node_feature_dim': self.node_features.shape[-1],
+            'edge_static_dim': self.edge_static.shape[-1],
+            'edge_density_dim': 4,
+            'edge_feature_dim': self.edge_static.shape[-1] + 4,
+            'skip_factor': self.k
+        }
+
+
+def collate_skip_step_graphs(
+    batch: List[Tuple[List[MolecularGraph], torch.Tensor, List[MolecularGraph], Dict]]
+) -> Tuple[List[List[MolecularGraph]], torch.Tensor, List[List[MolecularGraph]], List[Dict]]:
+    """
+    Collate function for skip-step graph batches.
+
+    Args:
+        batch: List of (input_graphs, field_targets, target_graphs, supervision) tuples
+
+    Returns:
+        Batched inputs, stacked fields, batched targets, list of supervision dicts
+    """
+    input_seqs = [item[0] for item in batch]
+    field_targets = torch.stack([item[1] for item in batch], dim=0)
+    target_seqs = [item[2] for item in batch]
+    supervision_list = [item[3] for item in batch]
+
+    return input_seqs, field_targets, target_seqs, supervision_list
+
+
 # --- Utility functions for testing ---
 
 def create_test_graph(n_basis: int = 4) -> MolecularGraph:
