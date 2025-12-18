@@ -549,6 +549,14 @@ class DensityGraphNet(nn.Module):
     - Transferability (train on H2+, infer on H2)
     - Physics-aware learning (respects matrix structure)
 
+    Integration Modes:
+    - First-order (Euler): ρ(t+Δt) = ρ(t) + Δρ
+      Model predicts velocity-like term Δρ
+
+    - Second-order (Verlet): ρ(t+Δt) = 2ρ(t) - ρ(t-Δt) + Δ²ρ
+      Model predicts acceleration-like term Δ²ρ
+      Better for oscillatory dynamics (quantum coherences)
+
     Skip-Step Support:
     - Optional k-conditioning for variable time-step prediction
     - Learnable scaling based on skip factor
@@ -569,6 +577,7 @@ class DensityGraphNet(nn.Module):
                 - dropout: Dropout rate
                 - max_skip_factor: Maximum k for skip-step (default: 32)
                 - use_skip_conditioning: Whether to condition on k (default: False)
+                - use_verlet: Use Verlet (second-order) integration (default: False)
         """
         super().__init__()
 
@@ -591,6 +600,9 @@ class DensityGraphNet(nn.Module):
         # Skip-step configuration
         self.max_skip_factor = config.get('max_skip_factor', 32)
         self.use_skip_conditioning = config.get('use_skip_conditioning', False)
+
+        # Integration mode: Euler (first-order) or Verlet (second-order)
+        self.use_verlet = config.get('use_verlet', False)
 
         # GNN encoder
         self.gnn_encoder = DensityMessagePassing(
@@ -728,7 +740,8 @@ class DensityGraphNet(nn.Module):
         graph_seq: List[MolecularGraph],
         next_field: torch.Tensor,
         return_matrix: bool = False,
-        skip_factor: int = 1
+        skip_factor: int = 1,
+        prev_edge_density: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Forward pass: predict next density state.
@@ -738,12 +751,14 @@ class DensityGraphNet(nn.Module):
             next_field: (3,) or (B, 3) field at next timestep
             return_matrix: If True, return full density matrix instead of edges
             skip_factor: k - number of time steps to skip (for skip-step training)
+            prev_edge_density: (E, 4) previous edge density for Verlet rollout
+                              Only needed when use_verlet=True and doing autoregressive rollout
 
         Returns:
             If return_matrix:
                 rho_pred: (2, N, N) complex density matrix
             Else:
-                delta_rho: (E, 4) predicted edge changes
+                new_edge_density: (E, 4) predicted edge densities (or delta for non-Verlet)
         """
         # Handle batched vs single field
         if next_field.dim() == 1:
@@ -788,7 +803,7 @@ class DensityGraphNet(nn.Module):
         last_edge_index = edge_indices[-1]
         last_edge_batch = edge_batches[-1]
 
-        # Decode delta
+        # Decode delta (acceleration for Verlet, velocity for Euler)
         delta_rho = self.decoder(
             last_nodes,
             last_edge_index,
@@ -803,15 +818,29 @@ class DensityGraphNet(nn.Module):
             scale_edge = k_scale[last_edge_batch]  # (E, 1)
             delta_rho = delta_rho * scale_edge
 
-        # Enforce Hermiticity
+        # Enforce Hermiticity on delta
         delta_rho = enforce_hermiticity_edges(delta_rho, last_edge_index)
+
+        # Get current density from last graph
+        current_edges = last_graph.edge_density  # ρ(t)
+
+        if self.use_verlet:
+            # Verlet integration: ρ(t+Δt) = 2ρ(t) - ρ(t-Δt) + Δ²ρ
+            # delta_rho represents acceleration-like term (second derivative)
+            if prev_edge_density is not None:
+                # During rollout: prev_edge_density is explicitly passed
+                prev_edges = prev_edge_density
+            else:
+                # Initial prediction: use second-to-last graph from sequence
+                prev_edges = graph_seq[-2].edge_density  # ρ(t-Δt)
+
+            new_edges = 2 * current_edges - prev_edges + delta_rho
+        else:
+            # First-order (Euler): ρ(t+Δt) = ρ(t) + Δρ
+            new_edges = current_edges + delta_rho
 
         if return_matrix:
             # Reconstruct full density matrix
-            # Get current density from last graph
-            current_edges = last_graph.edge_density
-            new_edges = current_edges + delta_rho
-
             rho_pred = edge_features_to_density(
                 new_edges,
                 last_edge_index,
@@ -820,13 +849,14 @@ class DensityGraphNet(nn.Module):
             )
             return rho_pred
 
-        return delta_rho
+        return new_edges
 
     def predict_step(
         self,
         graph_seq: List[MolecularGraph],
         next_field: torch.Tensor,
-        skip_factor: int = 1
+        skip_factor: int = 1,
+        prev_edge_density: Optional[torch.Tensor] = None
     ) -> MolecularGraph:
         """
         Predict next graph state (for autoregressive inference).
@@ -835,17 +865,23 @@ class DensityGraphNet(nn.Module):
             graph_seq: List of MolecularGraph objects (history)
             next_field: (3,) field at next timestep
             skip_factor: k - number of time steps being skipped
+            prev_edge_density: (E, 4) previous edge density for Verlet rollout
 
         Returns:
             next_graph: MolecularGraph with predicted density
         """
-        # Get delta prediction
-        delta_rho = self.forward(graph_seq, next_field, return_matrix=False, skip_factor=skip_factor)
+        # Get new edge density (forward now applies integration internally)
+        new_edge_density = self.forward(
+            graph_seq, next_field,
+            return_matrix=False,
+            skip_factor=skip_factor,
+            prev_edge_density=prev_edge_density
+        )
 
         # Create new graph with updated density
         last_graph = graph_seq[-1]
         new_graph = last_graph.clone()
-        new_graph.edge_density = last_graph.edge_density + delta_rho
+        new_graph.edge_density = new_edge_density
 
         return new_graph
 
@@ -872,14 +908,32 @@ class DensityGraphNet(nn.Module):
         trajectory = []
         current_seq = list(initial_graphs)
 
+        # For Verlet: track previous edge density
+        prev_edge_density = None
+
         with torch.no_grad():
             for step in range(n_steps):
                 # Get field for this step
                 field = field_sequence[step] if step < len(field_sequence) else field_sequence[-1]
 
+                # For Verlet rollout: track ρ(t-1) explicitly
+                if self.use_verlet and step > 0:
+                    # prev_edge_density was set in previous iteration
+                    pass
+                else:
+                    prev_edge_density = None
+
                 # Predict next state
-                next_graph = self.predict_step(current_seq, field, skip_factor=skip_factor)
+                next_graph = self.predict_step(
+                    current_seq, field,
+                    skip_factor=skip_factor,
+                    prev_edge_density=prev_edge_density
+                )
                 trajectory.append(next_graph)
+
+                # Track previous edge density for Verlet
+                if self.use_verlet:
+                    prev_edge_density = current_seq[-1].edge_density.clone()
 
                 # Update sequence (slide window)
                 current_seq = current_seq[1:] + [next_graph]

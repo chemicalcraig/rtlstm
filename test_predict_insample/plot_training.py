@@ -32,7 +32,7 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
     
     # Settings
     spin_idx = 0  # Index 0 = Alpha spin
-    plot_steps = 250  # Limit plot to first 1000 steps
+    plot_steps = 200  # Limit plot to first 1000 steps
     
     # --- 4. Plotting Loop ---
     for i in range(4):

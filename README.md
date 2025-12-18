@@ -1,4 +1,4 @@
-TLSTM: Real-Time Quantum Dynamics with LSTMs
+RTLSTM: Real-Time Quantum Dynamics with LSTMs
 
 RTLSTM is a machine learning framework designed to accelerate Real-Time Time-Dependent Density Functional Theory (RT-TDDFT) simulations. It uses an LSTM architecture with residual connections to predict the time-evolution of the density matrix, bypassing expensive Kohn-Sham integration steps.
 

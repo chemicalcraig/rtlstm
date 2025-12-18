@@ -60,50 +60,136 @@ class SelfAttention(nn.Module):
         return attn_out
 
 class DensityMatrixLSTM(nn.Module):
+    """
+    LSTM-based density matrix predictor with optional Verlet integration.
+
+    Integration modes:
+    - First-order (Euler): ρ(t+Δt) = ρ(t) + Δρ
+      Model predicts velocity-like term Δρ
+
+    - Second-order (Verlet): ρ(t+Δt) = 2ρ(t) - ρ(t-Δt) + Δ²ρ
+      Model predicts acceleration-like term Δ²ρ
+      Better for oscillatory dynamics (quantum coherences)
+
+    Stabilized Verlet includes:
+    - Damping term to prevent runaway oscillations
+    - Adaptive Euler blending for early training stability
+    - Trace projection to enforce electron count conservation
+    """
     def __init__(self):
         super().__init__()
         self.n_basis = CFG['n_basis']
+        self.use_verlet = CFG.get('use_verlet', False)
+
+        # Verlet stabilization parameters
+        self.verlet_damping = CFG.get('verlet_damping', 0.1)  # Friction coefficient
+        self.verlet_blend = CFG.get('verlet_blend', 0.5)  # Blend with Euler (0=pure Verlet, 1=pure Euler)
+        self.trace_projection = CFG.get('trace_projection', True)  # Project to conserve trace
+        self.n_electrons = CFG.get('n_alpha', 1.0) + CFG.get('n_beta', 0.0)
+
         input_dim = (2 * 2 * self.n_basis**2) + 3
-        
+
         self.lstm = nn.LSTM(input_dim, CFG['hidden_dim'], batch_first=True)
         self.attention = SelfAttention(CFG['hidden_dim'])
         self.head = nn.Linear(CFG['hidden_dim'], 2 * 2 * self.n_basis**2)
 
-    def forward(self, rho_seq, field):
+    def forward(self, rho_seq, field, prev_rho=None):
+        """
+        Forward pass with optional Verlet integration.
+
+        Args:
+            rho_seq: (Batch, Seq, 2, N, N) - density matrix history
+            field: (Batch, 3) - external field at next timestep
+            prev_rho: (Batch, 2, N, N) - ρ(t-1) for Verlet in rollout
+                      Only needed when use_verlet=True and doing autoregressive rollout
+
+        Returns:
+            rho_pred: (Batch, 2, N, N) - predicted density matrix
+        """
         # rho_seq: (Batch, Seq, 2, N, N)
         B, S, _, _, _ = rho_seq.shape
         rho_flat = rho_seq.view(B, S, -1)
         rho_input = torch.cat([rho_flat.real, rho_flat.imag], dim=-1)
-        
+
         # Expand field to match sequence length
-        if field.dim() == 2: # (Batch, 3) -> Single step prediction
-             field_expanded = field.unsqueeze(1).expand(-1, S, -1)
-        else: # (Batch, Seq, 3) -> If passing full sequence field (not used in standard inference)
-             field_expanded = field
-             
-        # For prediction, we usually only care about the *next* field acting on the *last* state.
-        # However, standard LSTM takes (Input_t) -> Output_t+1.
-        # We align the field such that we append the *next* field to the *current* input.
-        # Note: Ideally, field input should be time-aligned. 
-        # Here we simplify: assume field matches temporal index.
         field_expanded = field.unsqueeze(1).expand(-1, S, -1)
 
         full_input = torch.cat([rho_input, field_expanded], dim=-1).float()
-        
+
         lstm_out, _ = self.lstm(full_input)
         attn_out = self.attention(lstm_out)
-        
+
         delta_raw = self.head(attn_out[:, -1, :])
         split = delta_raw.shape[-1] // 2
         delta_rho = torch.complex(delta_raw[:, :split], delta_raw[:, split:]) \
                         .to(torch.complex128) \
                         .view(B, 2, self.n_basis, self.n_basis)
-        
-        last_rho = rho_seq[:, -1]
-        rho_pred = last_rho + delta_rho
-        
+
+        last_rho = rho_seq[:, -1]  # ρ(t)
+
+        if self.use_verlet:
+            # Get previous state
+            if prev_rho is not None:
+                prev = prev_rho
+            else:
+                prev = rho_seq[:, -2]  # ρ(t-Δt)
+
+            # Velocity estimate from finite difference
+            velocity = last_rho - prev  # v ≈ ρ(t) - ρ(t-Δt)
+
+            # === Stabilized Verlet Integration ===
+            # Standard Verlet: ρ(t+Δt) = 2ρ(t) - ρ(t-Δt) + Δ²ρ
+            # With damping:    ρ(t+Δt) = 2ρ(t) - ρ(t-Δt) + Δ²ρ - γ*v
+            # The damping term -γ*v acts like friction to prevent runaway
+
+            rho_verlet = 2 * last_rho - prev + delta_rho - self.verlet_damping * velocity
+
+            # Euler prediction for blending
+            rho_euler = last_rho + delta_rho
+
+            # Blend Verlet with Euler for stability
+            # blend=0 -> pure Verlet, blend=1 -> pure Euler
+            rho_pred = (1 - self.verlet_blend) * rho_verlet + self.verlet_blend * rho_euler
+        else:
+            # First-order (Euler): ρ(t+Δt) = ρ(t) + Δρ
+            rho_pred = last_rho + delta_rho
+
+        # Enforce Hermiticity
         rho_pred = 0.5 * (rho_pred + rho_pred.transpose(-1, -2).conj())
+
+        # Trace projection: scale to conserve electron count (works for both Euler and Verlet)
+        if self.trace_projection:
+            rho_pred = self._project_trace(rho_pred)
+
         return rho_pred
+
+    def _project_trace(self, rho):
+        """Project density matrix to conserve trace (electron count)."""
+        # rho: (B, 2, N, N) - 2 spin channels
+        # Returns new tensor (no in-place modification for autograd)
+
+        target_alpha = CFG.get('n_alpha', 1.0)
+        target_beta = CFG.get('n_beta', 0.0)
+
+        # Compute traces for each batch and spin channel
+        # trace = sum of diagonal elements
+        trace_alpha = torch.diagonal(rho[:, 0], dim1=-2, dim2=-1).sum(dim=-1).real  # (B,)
+        trace_beta = torch.diagonal(rho[:, 1], dim1=-2, dim2=-1).sum(dim=-1).real   # (B,)
+
+        # Compute scale factors (avoid division by zero)
+        scale_alpha = target_alpha / (trace_alpha.abs() + 1e-10)  # (B,)
+        scale_beta = target_beta / (trace_beta.abs() + 1e-10)     # (B,)
+
+        # Handle zero target beta (no scaling needed)
+        if target_beta < 1e-10:
+            scale_beta = torch.ones_like(scale_beta)
+
+        # Apply scaling (broadcast over spatial dimensions)
+        rho_alpha = rho[:, 0] * scale_alpha.view(-1, 1, 1)  # (B, N, N)
+        rho_beta = rho[:, 1] * scale_beta.view(-1, 1, 1)    # (B, N, N)
+
+        # Stack back together
+        return torch.stack([rho_alpha, rho_beta], dim=1)
 
 class PhysicsLoss(nn.Module):
     def __init__(self, S):
@@ -150,18 +236,28 @@ def train():
             curr_input = x_seq
             
             # Rollout Loop
+            # For Verlet, track previous state explicitly
+            use_verlet = CFG.get('use_verlet', False)
+            prev_rho = None  # Will be set after first prediction
+
             for k in range(rollout):
-                next_field = f_seq[:, k, :] # (Batch, 3)
-                
-                # Predict
-                pred_rho = model(curr_input, next_field)
-                
+                next_field = f_seq[:, k, :]  # (Batch, 3)
+
+                # Predict (pass prev_rho for Verlet rollout)
+                pred_rho = model(curr_input, next_field, prev_rho=prev_rho)
+
                 # Loss
                 total_loss += crit(pred_rho, y_seq[:, k])
-                
+
                 # Autoregressive Feed
                 if k < rollout - 1:
-                    new_step = pred_rho.unsqueeze(1) # (Batch, 1, 2, N, N)
+                    if use_verlet:
+                        # For Verlet: track ρ(t-1) explicitly
+                        # After k=0: prev_rho = curr_input[:, -1], curr = pred_rho
+                        # After k=1: prev_rho = old_curr, curr = pred_rho
+                        prev_rho = curr_input[:, -1].clone()
+
+                    new_step = pred_rho.unsqueeze(1)  # (Batch, 1, 2, N, N)
                     curr_input = torch.cat([curr_input[:, 1:], new_step], dim=1)
 
             total_loss = total_loss / rollout
@@ -195,9 +291,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='inputs/train.json')
     parser.add_argument('--predict', action='store_true')
+    parser.add_argument('--verlet', action='store_true',
+                        help='Use Verlet (second-order) integration instead of Euler')
     args = parser.parse_args()
-    
+
     CFG = load_config(args.config, args)
-    
+
+    # CLI override for Verlet
+    if args.verlet:
+        CFG['use_verlet'] = True
+        print("Using Verlet (second-order) integration")
+
     if not CFG.get('predict_only', False):
         train()

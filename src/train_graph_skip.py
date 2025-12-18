@@ -133,18 +133,29 @@ def train_epoch(
             curr_seq = list(input_graphs)
             prev_delta = None
 
+            # For Verlet: track previous edge density
+            use_verlet = model.use_verlet
+            prev_edge_density = None
+
             # Rollout loop
             for step in range(min(rollout, len(target_graphs))):
                 next_field = fields[step]
                 target_graph = target_graphs[step]
 
-                # Compute target delta
+                # Get current and target density
                 last_density = curr_seq[-1].edge_density
                 target_density = target_graph.edge_density
-                delta_target = target_density - last_density
 
-                # Predict delta with skip-factor conditioning
-                delta_pred = model(curr_seq, next_field, skip_factor=k)
+                # Predict new density with skip-factor conditioning
+                # Model now returns full new density (applies Euler or Verlet internally)
+                new_density_pred = model(
+                    curr_seq, next_field, skip_factor=k,
+                    prev_edge_density=prev_edge_density
+                )
+
+                # Convert to delta for loss computation (both methods evaluated same way)
+                delta_pred = new_density_pred - last_density
+                delta_target = target_density - last_density
 
                 # Compute loss
                 loss, loss_dict = criterion(
@@ -170,8 +181,12 @@ def train_epoch(
                 # Autoregressive feed
                 prev_delta = delta_pred.detach()
                 if step < rollout - 1:
+                    # Track previous density for Verlet
+                    if use_verlet:
+                        prev_edge_density = last_density.clone()
+
                     new_graph = curr_seq[-1].clone()
-                    new_graph.edge_density = last_density + delta_pred.detach()
+                    new_graph.edge_density = new_density_pred.detach()
                     curr_seq = curr_seq[1:] + [new_graph]
 
             seq_loss = seq_loss / rollout
@@ -232,15 +247,26 @@ def validate(
                 seq_loss = 0.0
                 curr_seq = list(input_graphs)
 
+                # For Verlet: track previous edge density
+                use_verlet = model.use_verlet
+                prev_edge_density = None
+
                 for step in range(min(rollout, len(target_graphs))):
                     next_field = fields[step]
                     target_graph = target_graphs[step]
 
                     last_density = curr_seq[-1].edge_density
                     target_density = target_graph.edge_density
-                    delta_target = target_density - last_density
 
-                    delta_pred = model(curr_seq, next_field, skip_factor=k)
+                    # Model returns full new density
+                    new_density_pred = model(
+                        curr_seq, next_field, skip_factor=k,
+                        prev_edge_density=prev_edge_density
+                    )
+
+                    # Convert to delta for loss
+                    delta_pred = new_density_pred - last_density
+                    delta_target = target_density - last_density
 
                     loss, loss_dict = criterion(
                         delta_pred, delta_target,
@@ -251,8 +277,12 @@ def validate(
                     seq_loss += loss.item()
 
                     if step < rollout - 1:
+                        # Track previous density for Verlet
+                        if use_verlet:
+                            prev_edge_density = last_density.clone()
+
                         new_graph = curr_seq[-1].clone()
-                        new_graph.edge_density = last_density + delta_pred
+                        new_graph.edge_density = new_density_pred
                         curr_seq = curr_seq[1:] + [new_graph]
 
                 batch_loss += seq_loss / rollout
@@ -308,12 +338,14 @@ def train():
         'dropout': CFG.get('dropout', 0.1),
         'use_skip_conditioning': CFG.get('use_skip_conditioning', True),
         'max_skip_factor': CFG.get('final_skip', 20),
-        'k_embedding_dim': CFG.get('k_embedding_dim', 32)
+        'k_embedding_dim': CFG.get('k_embedding_dim', 32),
+        'use_verlet': CFG.get('use_verlet', False)
     }
 
     model = DensityGraphNet(model_config).to(CFG['device'])
     print(f"Model parameters: {count_parameters(model):,}")
     print(f"Skip conditioning: {model.use_skip_conditioning}")
+    print(f"Integration: {'Verlet (2nd order)' if model.use_verlet else 'Euler (1st order)'}")
 
     # Load pretrained if specified
     if CFG.get('pretrained_path') and os.path.exists(CFG['pretrained_path']):
@@ -589,6 +621,8 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, default='inputs/train_graph_skip.json')
     parser.add_argument('--create-config', action='store_true')
     parser.add_argument('--evaluate', action='store_true')
+    parser.add_argument('--verlet', action='store_true',
+                        help='Use Verlet (second-order) integration instead of Euler')
     args = parser.parse_args()
 
     if args.create_config:
@@ -608,6 +642,11 @@ if __name__ == "__main__":
                 json.dump(config, f, indent=4)
 
         CFG = load_config(args.config, args)
+
+        # CLI override for Verlet
+        if args.verlet:
+            CFG['use_verlet'] = True
+            print("Using Verlet (second-order) integration")
 
         if args.evaluate:
             evaluate_speedup()

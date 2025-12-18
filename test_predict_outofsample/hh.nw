@@ -1,0 +1,72 @@
+echo
+start h2_plus_rttddft
+title "rttddft h2 cation"
+permanent_dir ./perm
+scratch_dir ./scratch
+set dft:print_mats T
+
+
+charge +1
+
+geometry "h2p" units angstroms noautosym nocenter noautoz
+  load h2popt.xyz
+end
+
+set geometry "h2p"
+
+
+basis 
+  * library 3-21g
+end
+
+dft
+  odft
+  mult 2
+  direct
+  iterations 200
+  xc b3lyp
+  cdft 1 1 charge 0.7
+  print "final vectors analysis"
+  vectors output "h2plus.movecs"
+end
+
+task dft
+
+unset rt_tddft:*
+
+#dplot
+#  limitxyz
+#  -2 2 100
+#  -2 2 100
+#  -2 2 100
+#  gaussian
+#  spin total
+#end
+
+rt_tddft
+  load vectors "h2plus.movecs"
+  tmax 2000.0
+  dt 0.2
+  nrestarts 5000
+  print *
+  field "gpulse"
+    type gaussian   # Gaussian enveloped quasi-monochromatic pulse: E(t) = max * exp( -(t-t0)^2 / 2s^2) * sin(w0*t + phi0)
+    polarization z  # = x, y, z
+    frequency 0.12  # frequency of laser pulse in au (e.g., 0.12 au = 3.27 eV)
+    phase 0.0       # phase shift of laser pulse (in rad)
+    center 50.0    # center of Gaussian envelope (in au time)
+    width 50.0      # width of Gaussian pulse (in au time)
+    max 0.00     # maximum value of electric field
+    spin total      # = alpha, beta, total (only valid for open-shell)
+  end
+
+#  visualization
+#    tstart 0.0
+#    tend 960
+##    treference 0.0
+#    dplot
+#  end
+
+#  excite "h2p" with "gpulse"  
+end
+task dft rt_tddft
