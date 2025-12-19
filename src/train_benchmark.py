@@ -85,7 +85,17 @@ class DensityMatrixLSTM(nn.Module):
         self.verlet_damping = CFG.get('verlet_damping', 0.1)  # Friction coefficient
         self.verlet_blend = CFG.get('verlet_blend', 0.5)  # Blend with Euler (0=pure Verlet, 1=pure Euler)
         self.trace_projection = CFG.get('trace_projection', True)  # Project to conserve trace
-        self.n_electrons = CFG.get('n_alpha', 1.0) + CFG.get('n_beta', 0.0)
+        self.n_alpha = CFG.get('n_alpha', 1.0)
+        self.n_beta = CFG.get('n_beta', 0.0)
+
+        # Load overlap matrix for trace projection (Tr(ρS) = N_e in non-orthonormal AO basis)
+        try:
+            import numpy as np
+            S = np.load(CFG['overlap_file'])
+            self.register_buffer('S', torch.tensor(S, dtype=torch.complex128))
+        except:
+            # Fallback to identity (orthonormal basis)
+            self.register_buffer('S', torch.eye(self.n_basis, dtype=torch.complex128))
 
         input_dim = (2 * 2 * self.n_basis**2) + 3
 
@@ -164,32 +174,46 @@ class DensityMatrixLSTM(nn.Module):
         return rho_pred
 
     def _project_trace(self, rho):
-        """Project density matrix to conserve trace (electron count)."""
+        """
+        Project density matrix to conserve electron count.
+
+        In non-orthonormal AO basis: Tr(ρS) = N_electrons
+        Scale ρ so that Tr(ρS) equals target electron count.
+
+        Args:
+            rho: (B, 2, N, N) density matrix (2 spin channels)
+
+        Returns:
+            Scaled density matrix with correct Tr(ρS)
+        """
         # rho: (B, 2, N, N) - 2 spin channels
-        # Returns new tensor (no in-place modification for autograd)
+        # S: (N, N) overlap matrix
+        S = self.S.to(rho.device)
 
-        target_alpha = CFG.get('n_alpha', 1.0)
-        target_beta = CFG.get('n_beta', 0.0)
+        # Compute Tr(ρS) = Tr(ρ @ S) for each batch and spin channel
+        # For complex matrices: trace of product
+        rho_alpha = rho[:, 0]  # (B, N, N)
+        rho_beta = rho[:, 1]   # (B, N, N)
 
-        # Compute traces for each batch and spin channel
-        # trace = sum of diagonal elements
-        trace_alpha = torch.diagonal(rho[:, 0], dim1=-2, dim2=-1).sum(dim=-1).real  # (B,)
-        trace_beta = torch.diagonal(rho[:, 1], dim1=-2, dim2=-1).sum(dim=-1).real   # (B,)
+        # Tr(ρS) = sum_ij ρ_ij * S_ji = sum_ij ρ_ij * S_ij^T
+        # More efficiently: Tr(A @ B) = sum(A * B^T) element-wise
+        trace_alpha = torch.sum(rho_alpha * S.T, dim=(-2, -1)).real  # (B,)
+        trace_beta = torch.sum(rho_beta * S.T, dim=(-2, -1)).real    # (B,)
 
         # Compute scale factors (avoid division by zero)
-        scale_alpha = target_alpha / (trace_alpha.abs() + 1e-10)  # (B,)
-        scale_beta = target_beta / (trace_beta.abs() + 1e-10)     # (B,)
+        scale_alpha = self.n_alpha / (trace_alpha.abs() + 1e-10)  # (B,)
+        scale_beta = self.n_beta / (trace_beta.abs() + 1e-10)     # (B,)
 
-        # Handle zero target beta (no scaling needed)
-        if target_beta < 1e-10:
+        # Handle zero target beta (no scaling needed for empty channel)
+        if self.n_beta < 1e-10:
             scale_beta = torch.ones_like(scale_beta)
 
         # Apply scaling (broadcast over spatial dimensions)
-        rho_alpha = rho[:, 0] * scale_alpha.view(-1, 1, 1)  # (B, N, N)
-        rho_beta = rho[:, 1] * scale_beta.view(-1, 1, 1)    # (B, N, N)
+        rho_alpha_scaled = rho_alpha * scale_alpha.view(-1, 1, 1)  # (B, N, N)
+        rho_beta_scaled = rho_beta * scale_beta.view(-1, 1, 1)     # (B, N, N)
 
         # Stack back together
-        return torch.stack([rho_alpha, rho_beta], dim=1)
+        return torch.stack([rho_alpha_scaled, rho_beta_scaled], dim=1)
 
 class PhysicsLoss(nn.Module):
     def __init__(self, S):

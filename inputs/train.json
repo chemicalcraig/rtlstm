@@ -19,7 +19,10 @@
         "learning_rate": 1e-3,
         "epochs": 200,
         "rollout_steps": 5,
-        "use_verlet": false
+        "use_verlet": false,
+        "verlet_damping": 0.1,
+        "verlet_blend": 0.5,
+        "trace_projection": true
     },
     "physics": {
         "tolerance": 1e-8,

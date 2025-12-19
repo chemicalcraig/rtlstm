@@ -604,6 +604,18 @@ class DensityGraphNet(nn.Module):
         # Integration mode: Euler (first-order) or Verlet (second-order)
         self.use_verlet = config.get('use_verlet', False)
 
+        # Verlet stabilization
+        self.verlet_damping = config.get('verlet_damping', 0.1)
+        self.verlet_blend = config.get('verlet_blend', 0.5)
+
+        # Trace projection: Tr(ρS) = N_electrons (for non-orthonormal AO basis)
+        self.trace_projection = config.get('trace_projection', False)
+        self.n_alpha = config.get('n_alpha', 1.0)
+        self.n_beta = config.get('n_beta', 0.0)
+
+        # Overlap matrix will be set later via set_overlap_matrix()
+        self.register_buffer('S', None)
+
         # GNN encoder
         self.gnn_encoder = DensityMessagePassing(
             node_dim=self.node_dim,
@@ -675,6 +687,80 @@ class DensityGraphNet(nn.Module):
                         nn.init.orthogonal_(param)
                     elif 'bias' in name:
                         nn.init.zeros_(param)
+
+    def set_overlap_matrix(self, S: torch.Tensor):
+        """
+        Set the overlap matrix for Tr(ρS) projection.
+
+        Args:
+            S: (N, N) overlap matrix
+        """
+        self.S = S.to(self.decoder.output_scale.device)
+
+    def _project_trace_matrix(self, rho: torch.Tensor) -> torch.Tensor:
+        """
+        Project density matrix to conserve electron count: Tr(ρS) = N_electrons.
+
+        Args:
+            rho: (2, N, N) complex density matrix (alpha, beta channels)
+
+        Returns:
+            Scaled density matrix with correct Tr(ρS)
+        """
+        if self.S is None:
+            return rho
+
+        S = self.S.to(rho.device)
+
+        # Tr(ρS) = sum_ij ρ_ij * S_ji
+        trace_alpha = torch.sum(rho[0] * S.T).real
+        trace_beta = torch.sum(rho[1] * S.T).real
+
+        # Scale factors
+        scale_alpha = self.n_alpha / (trace_alpha.abs() + 1e-10)
+        scale_beta = self.n_beta / (trace_beta.abs() + 1e-10) if self.n_beta > 1e-10 else 1.0
+
+        rho_scaled = torch.stack([
+            rho[0] * scale_alpha,
+            rho[1] * scale_beta
+        ], dim=0)
+
+        return rho_scaled
+
+    def _project_trace_edges(
+        self,
+        edge_density: torch.Tensor,
+        edge_index: torch.Tensor,
+        n_basis: int
+    ) -> torch.Tensor:
+        """
+        Project edge-based density to conserve electron count: Tr(ρS) = N_electrons.
+
+        Reconstructs matrix, projects, then extracts edges back.
+
+        Args:
+            edge_density: (E, 4) edge features [re_α, im_α, re_β, im_β]
+            edge_index: (2, E) edge indices
+            n_basis: Number of basis functions
+
+        Returns:
+            Projected edge density (E, 4)
+        """
+        if self.S is None or not self.trace_projection:
+            return edge_density
+
+        # Reconstruct full density matrix from edges
+        rho = edge_features_to_density(
+            edge_density, edge_index, n_basis, symmetrize=True
+        )
+
+        # Project to conserve trace
+        rho_proj = self._project_trace_matrix(rho)
+
+        # Extract edges back
+        edge_density_proj = density_to_edge_features(rho_proj, edge_index)
+
+        return edge_density_proj
 
     def encode_sequence(
         self,
@@ -825,19 +911,32 @@ class DensityGraphNet(nn.Module):
         current_edges = last_graph.edge_density  # ρ(t)
 
         if self.use_verlet:
-            # Verlet integration: ρ(t+Δt) = 2ρ(t) - ρ(t-Δt) + Δ²ρ
-            # delta_rho represents acceleration-like term (second derivative)
+            # Get previous state
             if prev_edge_density is not None:
-                # During rollout: prev_edge_density is explicitly passed
                 prev_edges = prev_edge_density
             else:
-                # Initial prediction: use second-to-last graph from sequence
                 prev_edges = graph_seq[-2].edge_density  # ρ(t-Δt)
 
-            new_edges = 2 * current_edges - prev_edges + delta_rho
+            # Velocity estimate
+            velocity = current_edges - prev_edges
+
+            # Stabilized Verlet: ρ(t+Δt) = 2ρ(t) - ρ(t-Δt) + Δ²ρ - γ*v
+            new_edges_verlet = 2 * current_edges - prev_edges + delta_rho - self.verlet_damping * velocity
+
+            # Euler for blending
+            new_edges_euler = current_edges + delta_rho
+
+            # Blend Verlet with Euler
+            new_edges = (1 - self.verlet_blend) * new_edges_verlet + self.verlet_blend * new_edges_euler
         else:
             # First-order (Euler): ρ(t+Δt) = ρ(t) + Δρ
             new_edges = current_edges + delta_rho
+
+        # Apply Tr(ρS) = N_e projection if enabled
+        if self.trace_projection:
+            new_edges = self._project_trace_edges(
+                new_edges, last_edge_index, last_graph.num_nodes
+            )
 
         if return_matrix:
             # Reconstruct full density matrix
@@ -847,6 +946,11 @@ class DensityGraphNet(nn.Module):
                 last_graph.num_nodes,
                 symmetrize=True
             )
+
+            # Also project the matrix form if needed
+            if self.trace_projection and self.S is not None:
+                rho_pred = self._project_trace_matrix(rho_pred)
+
             return rho_pred
 
         return new_edges

@@ -24,7 +24,10 @@
         "dropout": 0.1,
         "use_skip_conditioning": true,
         "k_embedding_dim": 32,
-        "use_verlet": false
+        "use_verlet": false,
+        "verlet_damping": 0.1,
+        "verlet_blend": 0.5,
+        "trace_projection": true
     },
     "skip_step": {
         "initial_skip": 1,

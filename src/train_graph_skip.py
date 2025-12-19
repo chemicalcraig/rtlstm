@@ -339,10 +339,23 @@ def train():
         'use_skip_conditioning': CFG.get('use_skip_conditioning', True),
         'max_skip_factor': CFG.get('final_skip', 20),
         'k_embedding_dim': CFG.get('k_embedding_dim', 32),
-        'use_verlet': CFG.get('use_verlet', False)
+        'use_verlet': CFG.get('use_verlet', False),
+        # Verlet stabilization
+        'verlet_damping': CFG.get('verlet_damping', 0.1),
+        'verlet_blend': CFG.get('verlet_blend', 0.5),
+        # Trace projection: Tr(ρS) = N_e
+        'trace_projection': CFG.get('trace_projection', False),
+        'n_alpha': CFG.get('n_alpha', 1.0),
+        'n_beta': CFG.get('n_beta', 0.0)
     }
 
     model = DensityGraphNet(model_config).to(CFG['device'])
+
+    # Set overlap matrix for Tr(ρS) projection
+    if model_config['trace_projection']:
+        model.set_overlap_matrix(S)
+        print(f"Trace projection: Tr(ρS) = {model_config['n_alpha']} (alpha) + {model_config['n_beta']} (beta)")
+
     print(f"Model parameters: {count_parameters(model):,}")
     print(f"Skip conditioning: {model.use_skip_conditioning}")
     print(f"Integration: {'Verlet (2nd order)' if model.use_verlet else 'Euler (1st order)'}")

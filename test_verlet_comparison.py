@@ -42,11 +42,11 @@ CFG = {
     'skip_factor': SKIP_FACTOR,
     'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     'dtype': torch.complex128,
-    # Verlet stabilization
-    'verlet_damping': 0.02,     # Light damping
-    'verlet_blend': 0.0,        # Pure Verlet
-    'trace_projection': False,  # OFF during training
-    'trace_projection_inference': True,  # ON during inference
+    # Stabilization (applies to both Euler and Verlet)
+    'verlet_damping': 0.02,     # Light damping (Verlet only)
+    'verlet_blend': 0.0,        # Pure Verlet (no Euler blend)
+    'trace_projection': True,   # Tr(ρS) = N_e projection for BOTH methods
+    'trace_projection_inference': False,  # Already on during training
     'n_alpha': 1.0,
     'n_beta': 0.0
 }
@@ -224,9 +224,16 @@ def train_model(use_verlet: bool, cfg: dict):
             error = torch.norm(pred_rho - target_rho) / (torch.norm(target_rho) + 1e-10)
             rollout_errors.append(error.item())
 
-            # Trace error (should be ~1 for alpha, ~0 for beta)
-            trace_alpha = torch.real(torch.diagonal(pred_rho[:, 0], dim1=-2, dim2=-1).sum(-1))
-            trace_error = torch.abs(trace_alpha - 1.0).mean()
+            # Trace error: Tr(ρS) should equal N_electrons (1 for alpha, 0 for beta)
+            # Load overlap matrix
+            try:
+                S = torch.tensor(np.load(cfg['overlap_file']), dtype=pred_rho.dtype, device=pred_rho.device)
+            except:
+                S = torch.eye(pred_rho.shape[-1], dtype=pred_rho.dtype, device=pred_rho.device)
+
+            # Tr(ρS) = sum_ij ρ_ij * S_ji
+            trace_alpha = torch.sum(pred_rho[:, 0] * S.T, dim=(-2, -1)).real
+            trace_error = torch.abs(trace_alpha - cfg.get('n_alpha', 1.0)).mean()
             trace_errors.append(trace_error.item())
 
             if use_verlet:
