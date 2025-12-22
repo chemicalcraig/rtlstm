@@ -3,9 +3,11 @@ import matplotlib.pyplot as plt
 import os
 import matplotlib
 
-plot_steps = 250
+plot_steps = 350
 row_to_plot = 0
-outfile = "predicted_vs_sim_"+str(row_to_plot)+"x_imag.png"
+isReal = True #plot real or imag
+outfile = "predicted_vs_sim_"+str(row_to_plot)+"x_real.png" if isReal else "predicted_vs_sim_"+str(row_to_plot)+"x_imag.png"
+
 
 def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", save_path=outfile):
     # --- 1. Load Prediction Data ---
@@ -45,7 +47,7 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
             limit = min(plot_steps, len(gt_data))
             try:
                 # Ground Truth style: Black solid line
-                trace_gt = gt_data[:limit, spin_idx, row_to_plot, i].imag
+                trace_gt = gt_data[:limit, spin_idx, row_to_plot, i].real if isReal else gt_data[:limit, spin_idx, row_to_plot, i].imag
                 ax.plot(np.arange(limit), trace_gt, color='k', linewidth=1.5, alpha=0.6, label='Ground Truth')
             except IndexError:
                 # Fallback for shape mismatch
@@ -56,10 +58,10 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
         limit = min(plot_steps, len(pred_data))
         try:
             # Prediction style: Blue line with dots
-            trace_pred = pred_data[:limit, spin_idx, row_to_plot, i].imag
+            trace_pred = pred_data[:limit, spin_idx, row_to_plot, i].real if isReal else pred_data[:limit, spin_idx, row_to_plot, i].imag
             ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{row_to_plot},{i}]', marker=".", markersize=4)
         except IndexError:
-            trace_pred = pred_data[:limit, row_to_plot, i].imag
+            trace_pred = pred_data[:limit, row_to_plot, i].real if isReal else pred_data[:limit, row_to_plot, i].imag 
             ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{row_to_plot},{i}]', marker=".")
 
         # --- Formatting ---

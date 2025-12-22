@@ -1,0 +1,109 @@
+start h2_plus_rttddft
+#memory total 2000 mb
+#memory stack 400 mb heap 100 mb global 1500 mb
+title "H2+ RT-TDDFT Training Data Generation"
+
+echo
+
+permanent_dir ./perm
+scratch_dir ./scratch
+# Print Overlap Matrix
+set dft:print_mats T
+
+# H2+ cation (charge = +1, doublet spin)
+charge 1
+
+geometry "h2" units angstroms noautosym
+	load h2popt.xyz
+end
+
+set geometry "h2"
+
+basis spherical
+  * library 3-21g
+end
+
+#occup
+#	2 0
+#	0
+#	1
+#end
+
+# Ground state DFT calculation
+dft
+  odft
+  direct
+  xc pbe0                         # PBE0 hybrid functional
+  mult 2                          # Doublet for H2+
+  convergence energy 1e-7
+  convergence density 1e-6
+  iterations 100
+  print "final vectors analysis"
+  vectors output "h2plus.movecs"
+end
+
+#task dft optimize
+task dft energy
+# TDDFT to get overlap matrix
+tddft
+ nroots 2
+ algorithm 1
+ notriplet
+ target 1
+ targetsym a
+ civecs
+ grad
+   root 1
+ end
+	print "ao overlap"
+end
+#task tddft
+
+# RT-TDDFT calculation
+rt_tddft
+  load vectors "h2plus.movecs"
+# Time parameters (atomic units)
+  tmax 2000.0                      # Total time: 200 au ≈ 4.8 fs
+  dt 0.2                          # Timestep: 0.2 au ≈ 4.8 as
+  # Visualization/output frequency
+  nrestarts 8000                     # Print every 1 step (every step!)
+
+# External field - delta function kick along z-axis
+  field "gpulse"
+    type gaussian   # Gaussian enveloped quasi-monochromatic pulse: E(t) = max * exp( -(t-t0)^2 / 2s^2) * sin(w0*t + phi0)
+    polarization z  # = x, y, z
+    frequency 0.12  # frequency of laser pulse in au (e.g., 0.12 au = 3.27 eV)
+    phase 0.0       # phase shift of laser pulse (in rad)
+    center 150.0    # center of Gaussian envelope (in au time)
+    width 50.0      # width of Gaussian pulse (in au time)
+    max 0.0001      # maximum value of electric field
+    spin total      # = alpha, beta, total (only valid for open-shell)
+end
+
+  field "kick"
+    type delta                    # Instantaneous kick at t=0
+    polarization z                # Field along bond axis
+    max 0.1                     # Field strength in au (weak perturbation)
+    spin total
+  end
+#  visualization
+#    tstart 0.0
+#    tend 200.
+#    treference 0.0
+##    dplot
+#  end
+
+	# Propagation method
+	#exp 15 15                       # Magnus expansion order (15,15 is accurate)
+
+# Output options
+#  nchecks 10
+#  nprints 30
+#  nrestarts 1
+  print *
+
+  excite "h2" with "kick"
+end
+
+task dft rt_tddft
+
