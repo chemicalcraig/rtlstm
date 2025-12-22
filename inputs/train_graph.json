@@ -18,7 +18,13 @@
         "n_gnn_layers": 3,
         "n_lstm_layers": 2,
         "n_attention_heads": 4,
-        "dropout": 0.1
+        "dropout": 0.1,
+        "epochs": 700,
+        "rollout_steps": 5,
+        "use_verlet": false,
+        "verlet_damping": 0.1,
+        "verlet_blend": 0.5,
+        "trace_projection": true
     },
     "training": {
         "batch_size": 8,

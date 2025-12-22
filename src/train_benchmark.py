@@ -9,6 +9,8 @@ import os
 import json
 import matplotlib.pyplot as plt
 
+from timestep_sync import parse_field_timestamps, store_model_dt
+
 # --- Global Config Placeholder ---
 CFG = {}
 
@@ -294,8 +296,33 @@ def train():
             ep_loss += total_loss.item()
         
         if (epoch+1)%10 == 0: print(f"Epoch {epoch+1}: {ep_loss/len(loader):.7f}")
-        
-    torch.save(model.state_dict(), CFG['model_save_path'])
+
+    # Compute training dt from field file
+    try:
+        _, _, training_dt = parse_field_timestamps(CFG['field_file'])
+    except:
+        training_dt = CFG.get('dt', 0.4)  # Fallback to config or default
+        print(f"Warning: Could not parse field file for dt, using {training_dt}")
+
+    # Save model with dt metadata
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'config': {
+            'n_basis': CFG['n_basis'],
+            'hidden_dim': CFG['hidden_dim'],
+            'seq_len': CFG['seq_len'],
+            'use_verlet': CFG.get('use_verlet', False),
+            'verlet_damping': CFG.get('verlet_damping', 0.1),
+            'verlet_blend': CFG.get('verlet_blend', 0.5),
+            'trace_projection': CFG.get('trace_projection', True),
+            'n_alpha': CFG.get('n_alpha', 1.0),
+            'n_beta': CFG.get('n_beta', 0.0),
+        }
+    }
+    checkpoint = store_model_dt(checkpoint, training_dt)
+    torch.save(checkpoint, CFG['model_save_path'])
+    print(f"Model saved to {CFG['model_save_path']} (training_dt={training_dt:.6f})")
+
     return model, data
 
 def load_config(json_path, args):

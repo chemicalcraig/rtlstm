@@ -32,7 +32,7 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
     
     # Settings
     spin_idx = 0  # Index 0 = Alpha spin
-    plot_steps = 200  # Limit plot to first 1000 steps
+    plot_steps = 300  # Limit plot to first 1000 steps
     
     # --- 4. Plotting Loop ---
     for i in range(4):
@@ -64,7 +64,7 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
         # --- Formatting ---
         ax.set_title(f"Off-Diagonal Element ({0},{i})", fontsize=12)
         ax.set_xlabel("Step", fontsize=11)
-        ax.set_ylabel(f"ρ[{i},{i}] (real)", fontsize=11)
+        ax.set_ylabel(f"ρ[{i},{i}] (imag)", fontsize=11)
         ax.grid(True, which='both', linestyle='-', linewidth=0.5, alpha=0.6)
         ax.legend(loc='upper right')
     

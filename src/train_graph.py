@@ -355,7 +355,7 @@ def train():
     )
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=20, verbose=True
+        optimizer, mode='min', factor=0.5, patience=20
     )
 
     # Create loss function
@@ -376,6 +376,7 @@ def train():
     print("-" * 60)
 
     for epoch in range(epochs):
+        print(f"Epoch {epoch+1}/{epochs} on {CFG['device']}", flush=True)
         start_time = time.time()
 
         # Train
@@ -467,9 +468,9 @@ def create_default_config():
     """Create default configuration file."""
     config = {
         "io": {
-            "density_file": "test_train/densities/density_series.npy",
-            "overlap_file": "test_train/data/h2_plus_rttddft_overlap.npy",
-            "field_file": "test_train/data/field.dat",
+            "density_file": "densities/density_series.npy",
+            "overlap_file": "data/h2_plus_rttddft_overlap.npy",
+            "field_file": "data/field.dat",
             "positions_file": None,
             "atomic_numbers_file": None,
             "model_save_path": "density_graph.pt"

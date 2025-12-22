@@ -1,0 +1,38 @@
+{
+    "io": {
+        "density_file": "densities/density_series.npy",
+        "overlap_file": "data/h2_plus_rttddft_overlap.npy",
+        "field_file": "data/field.dat",
+        "model_save_path": "density_lstm.pt",
+        "plot_save_path": "dynamics_plot.png"
+    },
+    "system": {
+        "spin-polarization": "open-shell",
+        "n_basis": 4,
+        "n_alpha": 1.0,
+        "n_beta": 0.0
+    },
+    "model": {
+        "seq_len": 50,
+        "hidden_dim": 128,
+        "batch_size": 32,
+        "learning_rate": 1e-3,
+        "epochs": 500,
+        "rollout_steps": 5,
+        "use_verlet": false,
+        "verlet_damping": 0.1,
+        "verlet_blend": 0.5,
+        "trace_projection": true
+    },
+    "physics": {
+        "tolerance": 1e-8,
+        "lambda_trace": 1.0e-5,
+        "lambda_herm": 1.0e-6,
+        "lambda_idem": 1.0e-4
+    },
+    "execution": {
+        "plot": true,
+        "predict_only": false,
+        "benchmark_k_steps": 20    
+    }
+}

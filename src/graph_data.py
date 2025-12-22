@@ -33,6 +33,147 @@ except ImportError:
 # --- Constants ---
 MAX_ATOMIC_NUM = 20  # Support up to Calcium for now
 
+# Periodic table for element symbol to atomic number conversion
+ELEMENT_TO_Z = {
+    'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8,
+    'F': 9, 'Ne': 10, 'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15,
+    'S': 16, 'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20
+}
+
+
+def parse_xyz_file(xyz_path: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """
+    Parse an XYZ file to extract atomic positions and atomic numbers.
+
+    XYZ format:
+        N_atoms
+        Comment line
+        Element1  x1  y1  z1
+        Element2  x2  y2  z2
+        ...
+
+    Args:
+        xyz_path: Path to .xyz file
+
+    Returns:
+        positions: (N_atoms, 3) array of atomic positions
+        atomic_numbers: (N_atoms,) array of atomic numbers (Z)
+        elements: List of element symbols
+    """
+    positions = []
+    atomic_numbers = []
+    elements = []
+
+    with open(xyz_path, 'r') as f:
+        lines = f.readlines()
+
+    # First line: number of atoms
+    n_atoms = int(lines[0].strip())
+
+    # Skip comment line (line 1), parse atom lines (lines 2 onwards)
+    for i in range(2, 2 + n_atoms):
+        parts = lines[i].split()
+        element = parts[0].capitalize()  # Handle case variations
+        x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+
+        elements.append(element)
+        positions.append([x, y, z])
+
+        # Convert element symbol to atomic number
+        if element in ELEMENT_TO_Z:
+            atomic_numbers.append(ELEMENT_TO_Z[element])
+        else:
+            raise ValueError(f"Unknown element: {element}")
+
+    return np.array(positions), np.array(atomic_numbers), elements
+
+
+def expand_atom_to_basis_positions(
+    atom_positions: np.ndarray,
+    atom_atomic_numbers: np.ndarray,
+    n_basis: int,
+    basis_per_atom: Optional[List[int]] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Expand atom-centered positions to per-basis-function positions.
+
+    For atom-centered basis sets, each basis function is located at an
+    atomic position. Multiple basis functions can be on the same atom.
+
+    Args:
+        atom_positions: (N_atoms, 3) atomic positions
+        atom_atomic_numbers: (N_atoms,) atomic numbers
+        n_basis: Total number of basis functions
+        basis_per_atom: List of basis functions per atom. If None, assumes
+                       equal distribution (n_basis // n_atoms per atom).
+
+    Returns:
+        basis_positions: (n_basis, 3) position for each basis function
+        basis_atomic_numbers: (n_basis,) atomic number for each basis function
+    """
+    n_atoms = len(atom_positions)
+
+    if basis_per_atom is None:
+        # Assume equal distribution of basis functions per atom
+        if n_basis % n_atoms != 0:
+            # Try to distribute as evenly as possible
+            base = n_basis // n_atoms
+            remainder = n_basis % n_atoms
+            basis_per_atom = [base + (1 if i < remainder else 0) for i in range(n_atoms)]
+        else:
+            basis_per_atom = [n_basis // n_atoms] * n_atoms
+
+    if sum(basis_per_atom) != n_basis:
+        raise ValueError(
+            f"basis_per_atom sum ({sum(basis_per_atom)}) != n_basis ({n_basis})"
+        )
+
+    # Expand positions and atomic numbers
+    basis_positions = []
+    basis_atomic_numbers = []
+
+    for atom_idx, n_funcs in enumerate(basis_per_atom):
+        for _ in range(n_funcs):
+            basis_positions.append(atom_positions[atom_idx])
+            basis_atomic_numbers.append(atom_atomic_numbers[atom_idx])
+
+    return np.array(basis_positions), np.array(basis_atomic_numbers)
+
+
+def load_geometry_from_xyz(
+    xyz_path: str,
+    n_basis: int,
+    basis_per_atom: Optional[List[int]] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Load molecular geometry from XYZ file and expand to basis function positions.
+
+    This is the main entry point for loading geometry from XYZ files.
+
+    Args:
+        xyz_path: Path to .xyz file
+        n_basis: Total number of basis functions (from overlap matrix)
+        basis_per_atom: Optional list specifying basis functions per atom.
+                       If None, distributes evenly.
+
+    Returns:
+        positions: (n_basis, 3) tensor of basis function positions
+        atomic_numbers: (n_basis,) tensor of atomic numbers
+    """
+    atom_pos, atom_z, elements = parse_xyz_file(xyz_path)
+
+    print(f"[XYZ] Parsed {len(elements)} atoms: {', '.join(elements)}")
+    print(f"[XYZ] Expanding to {n_basis} basis functions...")
+
+    basis_pos, basis_z = expand_atom_to_basis_positions(
+        atom_pos, atom_z, n_basis, basis_per_atom
+    )
+
+    return (
+        torch.tensor(basis_pos, dtype=torch.float64),
+        torch.tensor(basis_z, dtype=torch.long)
+    )
+
 
 @dataclass
 class MolecularGraph:
@@ -356,6 +497,8 @@ class MolecularGraphDataset(Dataset):
         overlap_file: str,
         positions_file: Optional[str] = None,
         atomic_numbers_file: Optional[str] = None,
+        xyz_file: Optional[str] = None,
+        basis_per_atom: Optional[List[int]] = None,
         seq_len: int = 20,
         rollout_steps: int = 5,
         overlap_threshold: float = 1e-6,
@@ -370,8 +513,12 @@ class MolecularGraphDataset(Dataset):
             density_file: Path to .npy file with density matrices
             field_file: Path to field.dat with external field data
             overlap_file: Path to overlap matrix .npy file
-            positions_file: Path to basis center positions (optional)
-            atomic_numbers_file: Path to atomic numbers array (optional)
+            positions_file: Path to basis center positions .npy (optional)
+            atomic_numbers_file: Path to atomic numbers .npy array (optional)
+            xyz_file: Path to .xyz geometry file (alternative to positions_file)
+                     XYZ takes precedence if both are provided
+            basis_per_atom: List of basis functions per atom (for xyz_file)
+                           If None, distributes n_basis evenly across atoms
             seq_len: Number of history steps for input sequence
             rollout_steps: Number of future steps for training targets
             overlap_threshold: S_ij threshold for graph connectivity
@@ -426,21 +573,24 @@ class MolecularGraphDataset(Dataset):
         assert self.S.shape == (self.n_basis, self.n_basis), \
             f"Overlap shape mismatch: {self.S.shape} vs ({self.n_basis}, {self.n_basis})"
 
-        # Load or generate positions
-        if positions_file is not None:
+        # Load positions and atomic numbers
+        # Priority: xyz_file > positions_file/atomic_numbers_file > dummy
+        if xyz_file is not None:
+            # Load from XYZ geometry file
+            self.positions, self.atomic_numbers = load_geometry_from_xyz(
+                xyz_file, self.n_basis, basis_per_atom
+            )
+        elif positions_file is not None:
             self.positions = torch.tensor(np.load(positions_file), dtype=torch.float64)
+            if atomic_numbers_file is not None:
+                self.atomic_numbers = torch.tensor(np.load(atomic_numbers_file), dtype=torch.long)
+            else:
+                print("[GraphDataset] Warning: No atomic numbers file, assuming hydrogen")
+                self.atomic_numbers = torch.ones(self.n_basis, dtype=torch.long)
         else:
             # Default: place basis functions at origin (not ideal but functional)
-            # In practice, should extract from quantum chemistry output
-            print("[GraphDataset] Warning: No positions file, using dummy positions")
+            print("[GraphDataset] Warning: No geometry file, using dummy positions")
             self.positions = self._generate_dummy_positions()
-
-        # Load or generate atomic numbers
-        if atomic_numbers_file is not None:
-            self.atomic_numbers = torch.tensor(np.load(atomic_numbers_file), dtype=torch.long)
-        else:
-            # Default: assume hydrogen (Z=1) for all
-            print("[GraphDataset] Warning: No atomic numbers file, assuming hydrogen")
             self.atomic_numbers = torch.ones(self.n_basis, dtype=torch.long)
 
         # Build graph structure (constant for all timesteps)
@@ -586,6 +736,8 @@ class SkipStepGraphDataset(Dataset):
         overlap_file: str,
         positions_file: Optional[str] = None,
         atomic_numbers_file: Optional[str] = None,
+        xyz_file: Optional[str] = None,
+        basis_per_atom: Optional[List[int]] = None,
         seq_len: int = 20,
         rollout_steps: int = 5,
         skip_factor: int = 1,
@@ -601,8 +753,10 @@ class SkipStepGraphDataset(Dataset):
             density_file: Path to density matrix time series
             field_file: Path to field data
             overlap_file: Path to overlap matrix
-            positions_file: Optional path to basis positions
-            atomic_numbers_file: Optional path to atomic numbers
+            positions_file: Optional path to basis positions .npy
+            atomic_numbers_file: Optional path to atomic numbers .npy
+            xyz_file: Path to .xyz geometry file (alternative to positions_file)
+            basis_per_atom: List of basis functions per atom (for xyz_file)
             seq_len: Sequence length (at coarse resolution)
             rollout_steps: Number of prediction steps
             skip_factor: k - number of fine steps per coarse step
@@ -650,17 +804,24 @@ class SkipStepGraphDataset(Dataset):
         # Load overlap matrix
         self.S = torch.tensor(np.load(overlap_file), dtype=torch.float64)
 
-        # Load or generate positions
-        if positions_file is not None:
+        # Load positions and atomic numbers
+        # Priority: xyz_file > positions_file/atomic_numbers_file > dummy
+        if xyz_file is not None:
+            # Load from XYZ geometry file
+            self.positions, self.atomic_numbers = load_geometry_from_xyz(
+                xyz_file, self.n_basis, basis_per_atom
+            )
+        elif positions_file is not None:
             self.positions = torch.tensor(np.load(positions_file), dtype=torch.float64)
+            if atomic_numbers_file is not None:
+                self.atomic_numbers = torch.tensor(np.load(atomic_numbers_file), dtype=torch.long)
+            else:
+                self.atomic_numbers = torch.ones(self.n_basis, dtype=torch.long)
         else:
+            # Default: linear arrangement
+            print("[SkipStepGraphDataset] Warning: No geometry file, using dummy positions")
             self.positions = torch.zeros(self.n_basis, 3, dtype=torch.float64)
             self.positions[:, 0] = torch.arange(self.n_basis, dtype=torch.float64)
-
-        # Load or generate atomic numbers
-        if atomic_numbers_file is not None:
-            self.atomic_numbers = torch.tensor(np.load(atomic_numbers_file), dtype=torch.long)
-        else:
             self.atomic_numbers = torch.ones(self.n_basis, dtype=torch.long)
 
         # Build graph structure (shared across all timesteps)

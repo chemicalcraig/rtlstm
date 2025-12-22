@@ -43,6 +43,7 @@ from graph_model import (
     count_parameters
 )
 from skip_step import SkipStepCurriculum
+from timestep_sync import parse_field_timestamps, store_model_dt
 
 
 # Global config
@@ -315,6 +316,8 @@ def train():
         overlap_file=CFG['overlap_file'],
         positions_file=CFG.get('positions_file'),
         atomic_numbers_file=CFG.get('atomic_numbers_file'),
+        xyz_file=CFG.get('xyz_file'),
+        basis_per_atom=CFG.get('basis_per_atom'),
         seq_len=CFG.get('seq_len', 20),
         rollout_steps=CFG.get('rollout_steps', 5),
         skip_factor=CFG.get('initial_skip', 1),
@@ -363,7 +366,7 @@ def train():
     # Load pretrained if specified
     if CFG.get('pretrained_path') and os.path.exists(CFG['pretrained_path']):
         print(f"Loading pretrained weights from {CFG['pretrained_path']}")
-        checkpoint = torch.load(CFG['pretrained_path'], map_location=CFG['device'])
+        checkpoint = torch.load(CFG['pretrained_path'], map_location=CFG['device'], weights_only=False)
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         else:
@@ -449,7 +452,14 @@ def train():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_path = CFG.get('model_save_path', 'gnn_skip_step.pt')
-            torch.save({
+
+            # Compute training dt from field file
+            try:
+                _, _, training_dt = parse_field_timestamps(CFG['field_file'])
+            except:
+                training_dt = CFG.get('dt_fine', 0.4)
+
+            checkpoint = {
                 'epoch': epoch,
                 'k': k,
                 'model_state_dict': model.state_dict(),
@@ -457,7 +467,9 @@ def train():
                 'config': model_config,
                 'train_loss': train_loss,
                 'val_loss': val_loss
-            }, save_path)
+            }
+            checkpoint = store_model_dt(checkpoint, training_dt)
+            torch.save(checkpoint, save_path)
 
         elapsed = time.time() - start_time
 
@@ -491,7 +503,7 @@ def evaluate_speedup():
     print("=" * 70)
 
     # Load model
-    checkpoint = torch.load(CFG['model_save_path'], map_location=CFG['device'])
+    checkpoint = torch.load(CFG['model_save_path'], map_location=CFG['device'], weights_only=False)
     model_config = checkpoint['config']
     model = DensityGraphNet(model_config).to(CFG['device'])
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -578,8 +590,10 @@ def create_default_config() -> Dict:
             "density_file": "test_train/densities/density_series.npy",
             "overlap_file": "test_train/data/h2_plus_rttddft_overlap.npy",
             "field_file": "test_train/data/field.dat",
+            "xyz_file": None,
             "positions_file": None,
             "atomic_numbers_file": None,
+            "basis_per_atom": None,
             "model_save_path": "gnn_skip_step.pt",
             "history_path": "gnn_skip_history.json",
             "pretrained_path": None

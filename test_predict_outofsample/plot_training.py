@@ -3,10 +3,11 @@ import matplotlib.pyplot as plt
 import os
 import matplotlib
 
-plot_steps = 150
+plot_steps = 125
 row_to_plot = 0
+outfile = "predicted_vs_sim_"+str(row_to_plot)+"x_imag.png"
 
-def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", save_path="predicted_vs_gt_evolution.png"):
+def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", save_path=outfile):
     # --- 1. Load Prediction Data ---
     if not os.path.exists(pred_file):
         print(f"Error: Prediction file '{pred_file}' not found.")
@@ -56,15 +57,15 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
         try:
             # Prediction style: Blue line with dots
             trace_pred = pred_data[:limit, spin_idx, row_to_plot, i].imag
-            ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{0},{i}]', marker=".", markersize=4)
+            ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{row_to_plot},{i}]', marker=".", markersize=4)
         except IndexError:
             trace_pred = pred_data[:limit, row_to_plot, i].imag
-            ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{0},{i}]', marker=".")
+            ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{row_to_plot},{i}]', marker=".")
 
         # --- Formatting ---
-        ax.set_title(f"Off-Diagonal Element ({0},{i})", fontsize=12)
+        ax.set_title(f"Off-Diagonal Element ({row_to_plot},{i})", fontsize=12)
         ax.set_xlabel("Step", fontsize=11)
-        ax.set_ylabel(f"ρ[{i},{i}] (real)", fontsize=11)
+        ax.set_ylabel(f"ρ[{row_to_plot},{i}] (imag)", fontsize=11)
         ax.grid(True, which='both', linestyle='-', linewidth=0.5, alpha=0.6)
         ax.legend(loc='upper right')
     

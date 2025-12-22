@@ -3,7 +3,14 @@ import numpy as np
 import json
 import sys
 import os
+from pathlib import Path
 from train_benchmark import DensityMatrixLSTM, CFG # Import class definition
+from timestep_sync import (
+    get_model_dt,
+    parse_field_timestamps,
+    sync_bootstrap_to_model,
+    validate_timesteps
+)
 
 def load_single_rho(filepath, n_basis, dtype=torch.complex128):
     arr = np.load(filepath)
@@ -33,8 +40,8 @@ def generate_pulse_field(steps, dt, amplitude, freq):
 def run_prediction(config_path):
     with open(config_path, 'r') as f: config = json.load(f)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Running prediction on {device}...")   
-    
+    print(f"Running prediction on {device}...")
+
     # Setup Global CFG for Model Init
     CFG['n_basis'] = config['model']['n_basis']
     CFG['hidden_dim'] = config['model']['hidden_dim']
@@ -43,35 +50,82 @@ def run_prediction(config_path):
     seq_len = config['model']['seq_len']
     n_basis = CFG['n_basis']
 
-	# Load Model
-    model = DensityMatrixLSTM().to(CFG['device'])
-    model.load_state_dict(torch.load(config['io']['model_path'], map_location=CFG['device']))
+    # --- Timestep Validation ---
+    model_path = config['io']['model_path']
+    model_dt = get_model_dt(model_path)
+
+    # If model doesn't have stored dt, try to get from config
+    if model_dt is None:
+        model_dt = config.get('field', {}).get('dt', None)
+        if model_dt is None:
+            print("WARNING: Could not determine model training dt. Skipping timestep validation.")
+        else:
+            print(f"Using dt={model_dt} from prediction config (model has no stored dt)")
+    else:
+        print(f"Model training dt: {model_dt:.6f}")
+
+    # Load Model (handle both old state_dict and new checkpoint format)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    model = DensityMatrixLSTM().to(device)
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint)
     model.eval()
     
     # --- 1. Load Initial History ---
     init_cfg = config['initial_state']
     mode = init_cfg.get('mode', 'groundstate')
-    
+
     # This tensor will hold the history we want to SAVE to the file
-    initial_history_tensor = None 
+    initial_history_tensor = None
     consumed_steps = 0
+    synced_field = None  # Will hold field values if resampled
 
     if mode == 'warmstart':
         file_list = init_cfg['bootstrap_files']
+        field_cfg = config['field']
+
+        # --- Timestep Sync Check ---
+        if model_dt is not None and field_cfg.get('type') == 'file':
+            field_path = field_cfg['path']
+
+            # Infer density directory from bootstrap files
+            if file_list:
+                density_dir = str(Path(file_list[0]).parent)
+            else:
+                density_dir = None
+
+            print(f"Checking timestep compatibility...")
+            sync_result = sync_bootstrap_to_model(
+                bootstrap_files=file_list,
+                field_path=field_path,
+                model_dt=model_dt,
+                density_dir=density_dir,
+                tolerance=0.05  # 5% tolerance
+            )
+
+            print(f"  {sync_result['message']}")
+
+            if sync_result['was_resampled']:
+                file_list = sync_result['synced_files']
+                synced_field = torch.tensor(sync_result['synced_field'], dtype=torch.float64)
+                print(f"  Resampled to {len(file_list)} density files")
+
         print(f"Mode: Warm-Start. Loading first {seq_len} of {len(file_list)} files...")
-        
+
         # Load necessary history for model input
         files_to_load = file_list[:seq_len]
         consumed_steps = seq_len
-        
+
         history_list = []
         for fp in files_to_load:
-            rho = load_single_rho(fp, n_basis) 
+            rho = load_single_rho(fp, n_basis)
             history_list.append(rho)
-            
+
         # (Batch=1, Seq, Spin, N, N)
         current_seq = torch.stack(history_list).unsqueeze(0).to(device)
-        
+
         # Save this history for the output file
         initial_history_tensor = torch.stack(history_list) # (Seq, Spin, N, N)
 
@@ -82,24 +136,27 @@ def run_prediction(config_path):
         rho_gs = load_single_rho(gs_file, n_basis)
         current_seq = rho_gs.unsqueeze(0).unsqueeze(1).repeat(1, seq_len, 1, 1, 1).to(device)
         consumed_steps = 0
-        
+
         # For cold start, history is just repeated GS
         initial_history_tensor = rho_gs.unsqueeze(0).repeat(seq_len, 1, 1, 1)
 
     # --- 2. Prepare Field ---
-    # (Same field loading logic as before)
-    field_cfg = config['field']
-    if field_cfg.get('type') == 'file':
+    # Use synced field if resampling was performed, otherwise load from file
+    if synced_field is not None:
+        # Already resampled to match model dt
+        field_series = synced_field
+        print(f"Using resampled field ({len(field_series)} steps)")
+    elif field_cfg.get('type') == 'file':
         field_arr = np.loadtxt(field_cfg['path'])
         if field_arr.ndim == 1: field_arr = field_arr[1:] if len(field_arr)==4 else field_arr
-        elif field_arr.shape[1] == 4: field_arr = field_arr[:, 1:] 
+        elif field_arr.shape[1] == 4: field_arr = field_arr[:, 1:]
         field_series = torch.tensor(field_arr, dtype=torch.float64)
     else:
         field_series = generate_pulse_field(field_cfg['steps'], field_cfg['dt'], field_cfg['amplitude'], field_cfg['frequency'])
-    
+
     if consumed_steps > 0:
         field_series = field_series[consumed_steps:]
-    
+
     field_series = field_series.to(device)
 
     # --- 3. Run Prediction ---

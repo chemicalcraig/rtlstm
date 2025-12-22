@@ -410,7 +410,7 @@ def train():
     # Load pretrained weights if specified
     if CFG.get('pretrained_path'):
         print(f"Loading pretrained weights from {CFG['pretrained_path']}")
-        checkpoint = torch.load(CFG['pretrained_path'], map_location=CFG['device'])
+        checkpoint = torch.load(CFG['pretrained_path'], map_location=CFG['device'], weights_only=False)
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'])
         else:
@@ -675,7 +675,7 @@ if __name__ == "__main__":
             # Load trained model and evaluate
             print("Evaluation mode - loading model...")
             model = create_model(CFG.get('model_type', 'lstm')).to(CFG['device'])
-            checkpoint = torch.load(CFG['model_save_path'], map_location=CFG['device'])
+            checkpoint = torch.load(CFG['model_save_path'], map_location=CFG['device'], weights_only=False)
             model.load_state_dict(checkpoint['model_state_dict'])
 
             dataset, S, _ = load_data_for_skip_step(CFG.get('model_type', 'lstm'))

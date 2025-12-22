@@ -112,11 +112,12 @@ class EdgeGatedGCN(MessagePassing):
         hidden_dim: int,
         dropout: float = 0.1
     ):
-        super().__init__(aggr='add', flow='source_to_target')
+        super().__init__(aggr='add', flow='source_to_target', node_dim=0)
 
-        self.node_dim = node_dim
-        self.edge_dim = edge_dim
-        self.hidden_dim = hidden_dim
+        # Use different names to avoid conflicting with PyG's node_dim attribute
+        self.n_node_features = node_dim
+        self.n_edge_features = edge_dim
+        self.n_hidden = hidden_dim
 
         # Message network: combines source, target nodes and edge
         self.message_mlp = MLP(
