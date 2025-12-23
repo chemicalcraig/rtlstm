@@ -67,7 +67,7 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
         # --- Formatting ---
         ax.set_title(f"Off-Diagonal Element ({row_to_plot},{i})", fontsize=12)
         ax.set_xlabel("Step", fontsize=11)
-        ax.set_ylabel(f"ρ[{row_to_plot},{i}] (imag)", fontsize=11)
+        ax.set_ylabel(f"ρ[{row_to_plot},{i}] ", fontsize=11)
         ax.grid(True, which='both', linestyle='-', linewidth=0.5, alpha=0.6)
         ax.legend(loc='upper right')
     

@@ -218,15 +218,81 @@ class DensityMatrixLSTM(nn.Module):
         return torch.stack([rho_alpha_scaled, rho_beta_scaled], dim=1)
 
 class PhysicsLoss(nn.Module):
-    def __init__(self, S):
+    def __init__(self, S, element_weights=None):
+        """
+        Physics-informed loss with optional element-wise weighting.
+
+        Args:
+            S: Overlap matrix
+            element_weights: (2, N, N) tensor of weights per element.
+                           If None, uniform weighting is used.
+                           Use compute_variance_weights() to create these.
+        """
         super().__init__()
         self.S = S.to(CFG['device'])
-    
+        if element_weights is not None:
+            self.register_buffer('element_weights', element_weights.to(CFG['device']))
+        else:
+            self.register_buffer('element_weights', None)
+
     def forward(self, rho_pred, rho_target):
-        # MSE
-        loss = F.mse_loss(rho_pred.real, rho_target.real) + \
-               F.mse_loss(rho_pred.imag, rho_target.imag)
+        if self.element_weights is not None:
+            # Weighted MSE: weight by inverse variance per element
+            # This gives equal importance to all elements regardless of their amplitude
+            diff_real = (rho_pred.real - rho_target.real) ** 2
+            diff_imag = (rho_pred.imag - rho_target.imag) ** 2
+
+            # Expand weights for batch dimension: (2, N, N) -> (1, 2, N, N)
+            w = self.element_weights.unsqueeze(0)
+
+            # Weighted mean
+            loss = (w * diff_real).mean() + (w * diff_imag).mean()
+        else:
+            # Standard MSE
+            loss = F.mse_loss(rho_pred.real, rho_target.real) + \
+                   F.mse_loss(rho_pred.imag, rho_target.imag)
         return loss
+
+
+def compute_variance_weights(dataset, min_weight=0.1, max_weight=100.0):
+    """
+    Compute element-wise weights based on inverse variance.
+
+    Elements with small variance (small dynamics) get higher weights
+    so the model pays more attention to them.
+
+    Args:
+        dataset: MolecularDynamicsDataset with .rho attribute
+        min_weight: Minimum weight (prevents zero weights)
+        max_weight: Maximum weight (prevents exploding weights for near-constant elements)
+
+    Returns:
+        weights: (2, N, N) tensor of weights
+    """
+    # Get all density matrices: (T, 2, N, N)
+    rho = dataset.rho
+
+    # Compute variance across time dimension for each element
+    # var: (2, N, N)
+    var_real = rho.real.var(dim=0)
+    var_imag = rho.imag.var(dim=0)
+
+    # Combined variance (real + imag)
+    var_combined = var_real + var_imag + 1e-12  # Avoid division by zero
+
+    # Inverse variance weighting
+    weights = 1.0 / var_combined
+
+    # Normalize so mean weight = 1
+    weights = weights / weights.mean()
+
+    # Clamp to reasonable range
+    weights = weights.clamp(min=min_weight, max=max_weight)
+
+    print(f"[VarianceWeights] Weight range: {weights.min():.3f} - {weights.max():.3f}")
+    print(f"[VarianceWeights] Weight stats: mean={weights.mean():.3f}, std={weights.std():.3f}")
+
+    return weights
 
 # --- 3. Training Loop (With Rollout) ---
 def train():
@@ -239,12 +305,24 @@ def train():
     rollout = CFG.get('rollout_steps', 5)
     data = MolecularDynamicsDataset(CFG['density_file'], CFG['field_file'], CFG['seq_len'], rollout_steps=rollout)
     loader = DataLoader(data, batch_size=CFG['batch_size'], shuffle=True)
-    
+
     model = DensityMatrixLSTM().to(CFG['device'])
     opt = torch.optim.Adam(model.parameters(), lr=CFG['learning_rate'])
-    crit = PhysicsLoss(S)
+
+    # Compute variance-based element weights for loss (optional)
+    use_variance_weights = CFG.get('use_variance_weights', False)
+    if use_variance_weights:
+        element_weights = compute_variance_weights(
+            data,
+            min_weight=CFG.get('var_weight_min', 0.1),
+            max_weight=CFG.get('var_weight_max', 100.0)
+        )
+        crit = PhysicsLoss(S, element_weights=element_weights)
+    else:
+        crit = PhysicsLoss(S)
     
-    print(f"Training with Rollout={rollout} for {CFG['epochs']} epochs...")
+    weight_str = " with variance-weighted loss" if use_variance_weights else ""
+    print(f"Training with Rollout={rollout} for {CFG['epochs']} epochs{weight_str}...")
     
     for epoch in range(CFG['epochs']):
         model.train()
@@ -317,6 +395,7 @@ def train():
             'trace_projection': CFG.get('trace_projection', True),
             'n_alpha': CFG.get('n_alpha', 1.0),
             'n_beta': CFG.get('n_beta', 0.0),
+            'use_variance_weights': use_variance_weights,
         }
     }
     checkpoint = store_model_dt(checkpoint, training_dt)
@@ -344,6 +423,8 @@ if __name__ == "__main__":
     parser.add_argument('--predict', action='store_true')
     parser.add_argument('--verlet', action='store_true',
                         help='Use Verlet (second-order) integration instead of Euler')
+    parser.add_argument('--variance-weights', action='store_true',
+                        help='Use inverse-variance element weighting for loss')
     args = parser.parse_args()
 
     CFG = load_config(args.config, args)
@@ -352,6 +433,11 @@ if __name__ == "__main__":
     if args.verlet:
         CFG['use_verlet'] = True
         print("Using Verlet (second-order) integration")
+
+    # CLI override for variance weighting
+    if args.variance_weights:
+        CFG['use_variance_weights'] = True
+        print("Using inverse-variance element weighting")
 
     if not CFG.get('predict_only', False):
         train()

@@ -3,9 +3,13 @@ import matplotlib.pyplot as plt
 import os
 import matplotlib
 
+plot_steps = 350
 row_to_plot = 0
+isReal = True #plot real or imag
+outfile = "predicted_vs_sim_"+str(row_to_plot)+"x_real.png" if isReal else "predicted_vs_sim_"+str(row_to_plot)+"x_imag.png"
 
-def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", save_path="predicted_vs_gt_evolution.png"):
+
+def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", save_path=outfile):
     # --- 1. Load Prediction Data ---
     if not os.path.exists(pred_file):
         print(f"Error: Prediction file '{pred_file}' not found.")
@@ -32,7 +36,6 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
     
     # Settings
     spin_idx = 0  # Index 0 = Alpha spin
-    plot_steps = 300  # Limit plot to first 1000 steps
     
     # --- 4. Plotting Loop ---
     for i in range(4):
@@ -44,7 +47,7 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
             limit = min(plot_steps, len(gt_data))
             try:
                 # Ground Truth style: Black solid line
-                trace_gt = gt_data[:limit, spin_idx, row_to_plot, i].imag
+                trace_gt = gt_data[:limit, spin_idx, row_to_plot, i].real if isReal else gt_data[:limit, spin_idx, row_to_plot, i].imag
                 ax.plot(np.arange(limit), trace_gt, color='k', linewidth=1.5, alpha=0.6, label='Ground Truth')
             except IndexError:
                 # Fallback for shape mismatch
@@ -55,16 +58,16 @@ def plot_diagonal_evolution(pred_file, gt_file="densities/density_series.npy", s
         limit = min(plot_steps, len(pred_data))
         try:
             # Prediction style: Blue line with dots
-            trace_pred = pred_data[:limit, spin_idx, row_to_plot, i].imag
-            ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{0},{i}]', marker=".", markersize=4)
+            trace_pred = pred_data[:limit, spin_idx, row_to_plot, i].real if isReal else pred_data[:limit, spin_idx, row_to_plot, i].imag
+            ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{row_to_plot},{i}]', marker=".", markersize=4)
         except IndexError:
-            trace_pred = pred_data[:limit, row_to_plot, i].imag
-            ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{0},{i}]', marker=".")
+            trace_pred = pred_data[:limit, row_to_plot, i].real if isReal else pred_data[:limit, row_to_plot, i].imag 
+            ax.plot(np.arange(limit), trace_pred, linewidth=2, label=f'Pred ρ[{row_to_plot},{i}]', marker=".")
 
         # --- Formatting ---
-        ax.set_title(f"Off-Diagonal Element ({0},{i})", fontsize=12)
+        ax.set_title(f"Off-Diagonal Element ({row_to_plot},{i})", fontsize=12)
         ax.set_xlabel("Step", fontsize=11)
-        ax.set_ylabel(f"ρ[{i},{i}] (imag)", fontsize=11)
+        ax.set_ylabel(f"ρ[{row_to_plot},{i}] (imag)", fontsize=11)
         ax.grid(True, which='both', linestyle='-', linewidth=0.5, alpha=0.6)
         ax.legend(loc='upper right')
     

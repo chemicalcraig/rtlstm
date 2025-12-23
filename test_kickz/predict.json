@@ -129,7 +129,7 @@
       "dt": 0.4
   },
   "model": {
-    "seq_len": 100,
+    "seq_len": 50,
     "n_basis": 4,
     "hidden_dim": 128
   }

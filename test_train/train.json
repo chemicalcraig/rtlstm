@@ -24,7 +24,12 @@
         "verlet_blend": 0.5,
         "trace_projection": true
     },
-    "physics": {
+    "training": {
+      "use_variance_weights": true,
+      "var_weight_min": 0.1,
+      "var_weight_max": 100.0
+    },
+     "physics": {
         "tolerance": 1e-8,
         "lambda_trace": 1.0e-5,
         "lambda_herm": 1.0e-6,
