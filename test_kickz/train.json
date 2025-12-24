@@ -13,19 +13,21 @@
         "n_beta": 0.0
     },
     "model": {
-        "seq_len": 50,
+        "seq_len": 90,
         "hidden_dim": 128,
         "batch_size": 32,
         "learning_rate": 1e-3,
         "epochs": 200,
-        "rollout_steps": 7,
+        "rollout_steps": 10,
         "use_verlet": false,
-        "verlet_damping": 0.1,
-        "verlet_blend": 0.5,
+        "verlet_damping": 0.25,
+		"verlet_damping_was": 0.1,
+		"verlet_blend_was": 0.5,
+        "verlet_blend": 0.25,
         "trace_projection": true
     },
     "training": {
-      "use_variance_weights": false,
+      "use_variance_weights": true,
       "var_weight_min": 0.1,
       "var_weight_max": 100.0
     },

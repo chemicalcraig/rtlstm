@@ -170,6 +170,7 @@ def run_prediction(config_path):
             
             # Predict
             pred_rho = model(current_seq, next_field)
+            #pred_rho = pred_rho.conj()
             predictions.append(pred_rho.squeeze(0).cpu()) # Store (Spin, N, N)
             
             # Update History

@@ -280,18 +280,32 @@ def compute_variance_weights(dataset, min_weight=0.1, max_weight=100.0):
     # Combined variance (real + imag)
     var_combined = var_real + var_imag + 1e-12  # Avoid division by zero
 
+    # Debug: print raw variances
+    print(f"[VarianceWeights] rho shape: {rho.shape}")
+    print(f"[VarianceWeights] var_real:\n{var_real}")
+    print(f"[VarianceWeights] var_imag:\n{var_imag}")
+    print(f"[VarianceWeights] var_combined:\n{var_combined}")
+
     # Inverse variance weighting
     weights = 1.0 / var_combined
 
-    # Normalize so mean weight = 1
-    weights = weights / weights.mean()
+    # Normalize PER SPIN CHANNEL so mean weight = 1 within each channel
+    # This prevents empty/zero spin channels from dominating the normalization
+    for spin in range(weights.shape[0]):
+        spin_weights = weights[spin]
+        # Only normalize if this channel has meaningful variance
+        if var_combined[spin].max() > 1e-10:
+            weights[spin] = spin_weights / spin_weights.mean()
+        else:
+            # Empty spin channel (e.g., beta in H2+) - set uniform weight
+            weights[spin] = 1.0
 
     # Clamp to reasonable range
     weights = weights.clamp(min=min_weight, max=max_weight)
 
     print(f"[VarianceWeights] Weight range: {weights.min():.3f} - {weights.max():.3f}")
     print(f"[VarianceWeights] Weight stats: mean={weights.mean():.3f}, std={weights.std():.3f}")
-
+    print("weights:", weights)
     return weights
 
 # --- 3. Training Loop (With Rollout) ---

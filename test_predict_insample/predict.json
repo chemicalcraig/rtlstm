@@ -115,7 +115,7 @@
       "_note": "If type is 'pulse', define parameters below instead of path",
       "amplitude": 0.01,
       "frequency": 0.12,
-      "steps": 500,
+      "steps": 1000,
       "dt": 0.4
   },
   "model": {
