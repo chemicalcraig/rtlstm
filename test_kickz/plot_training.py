@@ -4,7 +4,7 @@ import os
 import matplotlib
 
 plot_steps = 200
-row_to_plot = 1
+row_to_plot = 0
 isReal = True #plot real or imag
 outfile = "predicted_vs_sim_"+str(row_to_plot)+"x_real.png" if isReal else "predicted_vs_sim_"+str(row_to_plot)+"x_imag.png"
 

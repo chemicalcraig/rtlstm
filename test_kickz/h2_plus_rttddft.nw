@@ -64,7 +64,7 @@ rt_tddft
   load vectors "h2plus.movecs"
 # Time parameters (atomic units)
   tmax 2000.0                      # Total time: 200 au ≈ 4.8 fs
-  dt 0.2                          # Timestep: 0.2 au ≈ 4.8 as
+  dt 0.4                          # Timestep: 0.2 au ≈ 4.8 as
   # Visualization/output frequency
   nrestarts 8000                     # Print every 1 step (every step!)
 

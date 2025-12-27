@@ -18,8 +18,8 @@
         "batch_size": 32,
         "learning_rate": 1e-3,
         "epochs": 200,
-        "rollout_steps": 10,
-        "use_verlet": false,
+        "rollout_steps": 12,
+        "use_verlet": true,
         "verlet_damping": 0.25,
 		"verlet_damping_was": 0.1,
 		"verlet_blend_was": 0.5,
@@ -28,7 +28,7 @@
     },
     "training": {
       "use_variance_weights": true,
-      "var_weight_min": 0.1,
+      "var_weight_min": 0.01,
       "var_weight_max": 100.0
     },
      "physics": {

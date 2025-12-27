@@ -4,7 +4,7 @@ import json
 import sys
 import os
 from pathlib import Path
-from train_benchmark import DensityMatrixLSTM, CFG # Import class definition
+from train_benchmark import DensityMatrixLSTM, EnsembleDensityMatrixLSTM, CFG # Import class definitions
 from timestep_sync import (
     get_model_dt,
     parse_field_timestamps,
@@ -66,7 +66,33 @@ def run_prediction(config_path):
 
     # Load Model (handle both old state_dict and new checkpoint format)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    model = DensityMatrixLSTM().to(device)
+
+    # Check if this is an ensemble model
+    is_ensemble = False
+    if isinstance(checkpoint, dict) and 'config' in checkpoint:
+        is_ensemble = checkpoint['config'].get('use_ensemble', False)
+
+    if is_ensemble:
+        # Load masks from checkpoint
+        masks = checkpoint.get('masks', None)
+        if masks is None:
+            raise ValueError("Ensemble model checkpoint missing 'masks' key")
+
+        # Update CFG with ensemble params from checkpoint
+        ckpt_cfg = checkpoint['config']
+        CFG['use_verlet'] = ckpt_cfg.get('use_verlet', False)
+        CFG['verlet_damping'] = ckpt_cfg.get('verlet_damping', 0.1)
+        CFG['verlet_blend'] = ckpt_cfg.get('verlet_blend', 0.5)
+        CFG['trace_projection'] = ckpt_cfg.get('trace_projection', True)
+        CFG['n_alpha'] = ckpt_cfg.get('n_alpha', 1.0)
+        CFG['n_beta'] = ckpt_cfg.get('n_beta', 0.0)
+        CFG['overlap_file'] = config['model'].get('overlap_file', '')
+
+        model = EnsembleDensityMatrixLSTM(masks).to(device)
+        print(f"Loaded ensemble model with {len(masks)} sub-models")
+    else:
+        model = DensityMatrixLSTM().to(device)
+
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
